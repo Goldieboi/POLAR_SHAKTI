@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useStore } from '../store'
-import { Page, statusBadge, ResupplyDelaySlider } from '../components'
+import { Page, statusBadge, ResupplyDelaySlider, ResupplyTimelineBar } from '../components'
 import { post, runScenarioV1, ScenarioV1Response } from '../api'
 
 export const ResupplyPage: React.FC = () => {
@@ -52,7 +52,7 @@ export const ResupplyPage: React.FC = () => {
     >
       {/* 1. QUESTION-ORIENTED SUMMARY */}
       <div className="card" style={{ borderLeft: margin < 0 ? '4px solid var(--danger)' : '4px solid var(--blue)', marginBottom: 14 }}>
-        <h3 style={{ margin: '0 0 6px', fontSize: 14, color: margin < 0 ? 'var(--danger)' : 'var(--blue)', fontWeight: 700 }}>
+        <h3 style={{ margin: '0 0 6px', fontSize: 13, color: margin < 0 ? 'var(--danger)' : 'var(--blue)', fontWeight: 700 }}>
           WHEN CAN RESUPPLY REALISTICALLY ARRIVE?
         </h3>
         <p style={{ fontSize: 13, color: '#334155', margin: 0, lineHeight: 1.5 }}>
@@ -62,8 +62,8 @@ export const ResupplyPage: React.FC = () => {
         </p>
       </div>
 
-      {/* 2. HERO CARD */}
-      <div className={`hero-autonomy ${heroClass}`} style={{ marginBottom: 16 }}>
+      {/* 2. HERO CARD + TIMELINE */}
+      <div className={`hero-autonomy ${heroClass}`} style={{ marginBottom: 14 }}>
         <div>
           <div className="hero-label">P50 / P90 RESUPPLY WINDOW</div>
           <div className="hero-value">{p50.toFixed(1)} – {p90.toFixed(1)}</div>
@@ -82,6 +82,20 @@ export const ResupplyPage: React.FC = () => {
             <span>Decision: <b style={{ color: decision === 'ACCEPT_PLAN' ? 'var(--green)' : 'var(--danger)' }}>{decision}</b></span>
           </div>
         </div>
+      </div>
+
+      {/* VISUAL RESUPPLY TIMELINE BAR */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-dim)', letterSpacing: 0.8, textTransform: 'uppercase', marginBottom: 8 }}>
+          PROBABILISTIC RESUPPLY ARRIVAL TIMELINE VS SAFE HORIZON
+        </div>
+        <ResupplyTimelineBar
+          p10={p10}
+          p50={p50}
+          p90={p90}
+          safeOperabilityDays={safeDays}
+          cqrmDays={margin}
+        />
       </div>
 
       {/* 3. SIMULATION QUICK ACTION BUTTONS */}

@@ -23,27 +23,50 @@ try:
 except ImportError:
     linprog = None
 
-from ..config import (
-    BATTERY_CAPACITY_KWH, BATTERY_MAX_CHARGE_KW, BATTERY_MAX_DISCHARGE_KW,
-    BATTERY_CHARGE_EFF, BATTERY_DISCHARGE_EFF, DIESEL_FUEL_L_PER_KWH,
-    DIESEL_MIN_KW, SAFETY_RULES,
-)
-from ..state.system_state import STATE
-from . import forecast as fc
-from . import resupply_model as rm
+try:
+    from ..config import (
+        BATTERY_CAPACITY_KWH, BATTERY_MAX_CHARGE_KW, BATTERY_MAX_DISCHARGE_KW,
+        BATTERY_CHARGE_EFF, BATTERY_DISCHARGE_EFF, DIESEL_FUEL_L_PER_KWH,
+        DIESEL_MIN_KW, SAFETY_RULES,
+    )
+    from ..state.system_state import STATE
+    from . import forecast as fc
+    from . import resupply_model as rm
+except (ImportError, ValueError):
+    from app.config import (
+        BATTERY_CAPACITY_KWH, BATTERY_MAX_CHARGE_KW, BATTERY_MAX_DISCHARGE_KW,
+        BATTERY_CHARGE_EFF, BATTERY_DISCHARGE_EFF, DIESEL_FUEL_L_PER_KWH,
+        DIESEL_MIN_KW, SAFETY_RULES,
+    )
+    from app.state.system_state import STATE
+    from app.engines import forecast as fc
+    from app.engines import resupply_model as rm
 
 HORIZON_H = 6
 
 
-def optimize() -> dict[str, Any]:
+def optimize(
+    reserve_soc: Optional[float] = None,
+    flex_mult: Optional[float] = None,
+    diesel_max: Optional[float] = None,
+) -> dict[str, Any]:
     """Run resupply-conditioned optimization; return schedule + causality breakdown."""
     t0 = time.time()
     try:
-        result = _lp_schedule()
+        result = _lp_schedule(
+            reserve_soc_override=reserve_soc,
+            flex_mult_override=flex_mult,
+            diesel_max_override=diesel_max,
+        )
         result["method"] = "linear-programming (resupply-conditioned)"
         result["status"] = "optimal"
     except Exception as e:
-        result = _rule_based_schedule(reason=f"LP fallback: {e}")
+        result = _rule_based_schedule(
+            reason=f"LP fallback: {e}",
+            reserve_soc_override=reserve_soc,
+            flex_mult_override=flex_mult,
+            diesel_max_override=diesel_max,
+        )
         result["method"] = "rule-based-fallback"
         result["status"] = "fallback"
 
@@ -88,16 +111,19 @@ def _compute_risk_conditioned_reserves() -> tuple[float, float, dict]:
             p_arrive_before_soh = resupply_dist["daily_distribution"][-1]["cumulative_arrival_probability"]
 
     # 3. Reserve SOC: inversely proportional to arrival confidence
-    #    High p_arrive → low reserve needed; low p_arrive → high reserve
     uncertainty_penalty = max(0.0, (1.0 - p_arrive_before_soh) * 20.0)
     storm_penalty = 5.0 if is_storm else 0.0
     additional_reserve = uncertainty_penalty + storm_penalty
     reserve_soc = min(40.0, max(SAFETY_RULES["min_battery_soc"], 20.0 + additional_reserve))
+    if STATE.mode == "ENERGY_CONSERVATION":
+        reserve_soc = max(reserve_soc, 35.0)
 
     # 4. Flexible load multiplier: throttle more when resupply confidence is low
     confidence_throttle = max(0.0, (1.0 - p_arrive_before_soh) * 0.55)
     storm_throttle = 0.15 if is_storm else 0.0
     flex_mult = max(0.25, 1.0 - confidence_throttle - storm_throttle)
+    if STATE.mode == "ENERGY_CONSERVATION":
+        flex_mult = min(flex_mult, 0.35)
 
     causality = {
         "p_arrive_before_soh": round(p_arrive_before_soh, 3),
@@ -140,15 +166,33 @@ def _profile(H: int, flex_mult: float) -> list[dict]:
     return out
 
 
-def _diesel_max() -> float:
-    return 0.0 if STATE.generator_failed else SAFETY_RULES["generator_max_kw"]
+def _diesel_max(override: Optional[float] = None) -> float:
+    if STATE.generator_failed:
+        return 0.0
+    if override is not None:
+        return override
+    return SAFETY_RULES["generator_max_kw"]
 
 
-def _lp_schedule() -> dict[str, Any]:
+def _lp_schedule(
+    reserve_soc_override: Optional[float] = None,
+    flex_mult_override: Optional[float] = None,
+    diesel_max_override: Optional[float] = None,
+) -> dict[str, Any]:
     if linprog is None:
         raise RuntimeError("scipy is not installed; linprog unavailable")
     H = HORIZON_H
-    reserve_soc, flex_mult, resupply_causality = _compute_risk_conditioned_reserves()
+    if reserve_soc_override is not None and flex_mult_override is not None:
+        reserve_soc = float(reserve_soc_override)
+        flex_mult = float(flex_mult_override)
+        resupply_causality = {
+            "reserve_soc_target": reserve_soc,
+            "flex_mult": flex_mult,
+            "source": "candidate_strategy",
+        }
+    else:
+        reserve_soc, flex_mult, resupply_causality = _compute_risk_conditioned_reserves()
+
     prof = _profile(H, flex_mult)
 
     reserve_kwh = BATTERY_CAPACITY_KWH * (reserve_soc / 100.0)
@@ -160,6 +204,7 @@ def _lp_schedule() -> dict[str, Any]:
     A_eq, b_eq = [], []
     A_ub, b_ub = [], []
     soc_start = STATE.battery_soc / 100.0 * BATTERY_CAPACITY_KWH
+    d_max = _diesel_max(diesel_max_override)
 
     for h in range(H):
         load = prof[h]["load_hi"]
@@ -188,13 +233,13 @@ def _lp_schedule() -> dict[str, Any]:
         row_gen = [0.0] * (3 * H)
         row_gen[3 * h + 2] = 1.0
         A_ub.append(row_gen)
-        b_ub.append(_diesel_max())
+        b_ub.append(d_max)
 
     bounds = []
     for h in range(H):
         bounds.append((0.0, BATTERY_MAX_CHARGE_KW))
         bounds.append((0.0, BATTERY_MAX_DISCHARGE_KW))
-        bounds.append((0.0, _diesel_max()))
+        bounds.append((0.0, d_max))
 
     res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method="highs")
     if not res.success:
@@ -282,11 +327,27 @@ def _summary(steps: list[dict], end_soc: float, reserve_soc: float, flex_mult: f
     return ". ".join(parts) + "."
 
 
-def _rule_based_schedule(reason: str = "") -> dict[str, Any]:
+def _rule_based_schedule(
+    reason: str = "",
+    reserve_soc_override: Optional[float] = None,
+    flex_mult_override: Optional[float] = None,
+    diesel_max_override: Optional[float] = None,
+) -> dict[str, Any]:
     """Safe fallback rule-based strategy."""
     H = HORIZON_H
-    reserve_soc, flex_mult, resupply_causality = _compute_risk_conditioned_reserves()
+    if reserve_soc_override is not None and flex_mult_override is not None:
+        reserve_soc = float(reserve_soc_override)
+        flex_mult = float(flex_mult_override)
+        resupply_causality = {
+            "reserve_soc_target": reserve_soc,
+            "flex_mult": flex_mult,
+            "source": "candidate_strategy",
+        }
+    else:
+        reserve_soc, flex_mult, resupply_causality = _compute_risk_conditioned_reserves()
+
     prof = _profile(H, flex_mult)
+    d_max = _diesel_max(diesel_max_override)
 
     steps = []
     soc = STATE.battery_soc
@@ -306,7 +367,7 @@ def _rule_based_schedule(reason: str = "") -> dict[str, Any]:
                 net -= d
                 soc -= d / BATTERY_DISCHARGE_EFF / BATTERY_CAPACITY_KWH * 100
             if net > 0 and not STATE.generator_failed:
-                diesel_kw = round(max(min(net, _diesel_max()), DIESEL_MIN_KW if net > 5 else 0.0), 1)
+                diesel_kw = round(max(min(net, d_max), DIESEL_MIN_KW if net > 5 else 0.0), 1)
 
         steps.append({
             "start_offset_h": h,

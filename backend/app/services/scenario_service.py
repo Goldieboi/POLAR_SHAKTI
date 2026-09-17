@@ -22,8 +22,23 @@ from .decision_service import DecisionService
 
 logger = logging.getLogger("polar_ems.scenario")
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
-DATA_DIR = Path(os.environ.get("POLAR_EMS_DATA_DIR", BASE_DIR / "data"))
+def _find_data_dir() -> Path:
+    env_dir = os.environ.get("POLAR_EMS_DATA_DIR")
+    if env_dir and Path(env_dir).exists():
+        return Path(env_dir)
+    curr = Path(__file__).resolve()
+    for p in curr.parents:
+        cand = p / "data"
+        if cand.exists() and (cand / "Plant_1_Generation_Data.csv").exists():
+            return cand
+    for p in curr.parents:
+        cand = p / "data"
+        if cand.exists():
+            return cand
+    return curr.parent.parent.parent / "data"
+
+DATA_DIR = _find_data_dir()
+BASE_DIR = DATA_DIR.parent
 
 
 @dataclass
@@ -71,8 +86,9 @@ class ScenarioService:
         possible_paths = [
             DATA_DIR / "polar_ems_optimizer_synthetic_data (1).csv",
             DATA_DIR / "polar_ems_optimizer_synthetic_data.csv",
-            BASE_DIR / "backend" / "data" / "polar_ems_optimizer_synthetic_data (1).csv",
-            BASE_DIR / "backend" / "data" / "polar_ems_optimizer_synthetic_data.csv",
+            DATA_DIR / "Plant_1_Generation_Data.csv",
+            BASE_DIR / "data" / "polar_ems_optimizer_synthetic_data (1).csv",
+            BASE_DIR / "data" / "polar_ems_optimizer_synthetic_data.csv",
         ]
 
         data_path = None

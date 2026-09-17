@@ -19,14 +19,24 @@ import math
 import time
 from typing import Any
 
-from ..config import (
-    BATTERY_CAPACITY_KWH, BATTERY_DISCHARGE_EFF, DIESEL_FUEL_L_PER_KWH,
-    RESUPPLY_RISK_MARGIN_DAYS, CRITICAL_MARGIN_DAYS, EMERGENCY_FUEL_PCT,
-    SAFETY_RULES, USABLE_FUEL_L,
-)
-from ..state.system_state import STATE
-from . import forecast as fc
-from . import resupply_model as rm
+try:
+    from ..config import (
+        BATTERY_CAPACITY_KWH, BATTERY_DISCHARGE_EFF, DIESEL_FUEL_L_PER_KWH,
+        RESUPPLY_RISK_MARGIN_DAYS, CRITICAL_MARGIN_DAYS, EMERGENCY_FUEL_PCT,
+        SAFETY_RULES, USABLE_FUEL_L,
+    )
+    from ..state.system_state import STATE
+    from . import forecast as fc
+    from . import resupply_model as rm
+except (ImportError, ValueError):
+    from app.config import (
+        BATTERY_CAPACITY_KWH, BATTERY_DISCHARGE_EFF, DIESEL_FUEL_L_PER_KWH,
+        RESUPPLY_RISK_MARGIN_DAYS, CRITICAL_MARGIN_DAYS, EMERGENCY_FUEL_PCT,
+        SAFETY_RULES, USABLE_FUEL_L,
+    )
+    from app.state.system_state import STATE
+    from app.engines import forecast as fc
+    from app.engines import resupply_model as rm
 
 METHODOLOGY = (
     "Confidence-Qualified Resupply Margin (CQRM): CQRM_α(t) = SOH_α(t) − R_(1−α)(t). "

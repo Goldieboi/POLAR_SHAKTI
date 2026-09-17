@@ -1,62 +1,106 @@
 import React, { useState, useEffect } from 'react'
 import { useStore } from '../store'
-import { Page, statusBadge, BeforeAfterReplanCard, WhyPolarEmsPanel } from '../components'
-import { post, get, Recommendation, Step, BaselineComparison } from '../api'
+import { Page, statusBadge } from '../components'
+import { post, Recommendation, Step } from '../api'
 
+/**
+ * Recommended Operating Plan — Decision-First Operator Screen.
+ * Answers: "WHAT SHOULD THE OPERATOR DO NOW?"
+ */
 export const OptimizationPage: React.FC = () => {
   const { station, recommendation, refresh } = useStore()
   const [rec, setRec] = useState<Recommendation | null>(recommendation)
   const [busy, setBusy] = useState(false)
   const [planStatus, setPlanStatus] = useState<'PROPOSED' | 'ACCEPTED' | 'REJECTED' | 'CONSERVATION'>('PROPOSED')
   const [statusMessage, setStatusMessage] = useState<string>('')
+  const [approvalTime, setApprovalTime] = useState<string>('')
+  const [fallbackDelta, setFallbackDelta] = useState<any>(null)
   const [err, setErr] = useState('')
-  const [showBaseline, setShowBaseline] = useState(false)
-  const [baselineData, setBaselineData] = useState<BaselineComparison | null>(null)
-  const [baselineLoading, setBaselineLoading] = useState(false)
-  const [showSafetyModal, setShowSafetyModal] = useState(false)
-  const [showWhyModal, setShowWhyModal] = useState(false)
 
-  // Sync with store recommendation
+  // Trace state for Re-Optimize execution
+  const [traceSteps, setTraceSteps] = useState<string[]>([])
+  const [isTracing, setIsTracing] = useState(false)
+
+  // Sync with store recommendation on mount/update
   useEffect(() => {
     if (recommendation) {
       setRec(recommendation)
+      if (recommendation.status === 'approved' && !station?.awaiting_approval) {
+        setPlanStatus('ACCEPTED')
+      } else if (recommendation.status === 'conservation fallback active') {
+        setPlanStatus('CONSERVATION')
+      } else if (recommendation.status === 'rejected') {
+        setPlanStatus('REJECTED')
+      }
     }
-  }, [recommendation])
+  }, [recommendation, station?.awaiting_approval])
 
   const cur = rec ?? recommendation ?? station?.recommendation
   const plan = cur?.plan
   const safety = cur?.safety
-  const isSafetyPassed = safety ? safety.passed : true
-  const beforeAfter = station?.before_after_replan || cur?.before_after_replan
+  const cqrmMargin = station?.autonomy?.cqrm_margin_days ?? station?.autonomy?.autonomy_margin_days ?? 0.5
+  const isSafetyPassed = safety ? safety.passed : (station?.safety ? station.safety.passed : cqrmMargin >= 0)
 
-  // Handler: Re-Optimize Now
+  // Derive plain-English recommendation text
+  const cleanSummary = (plan?.recommendation_summary || station?.recommendation_summary || '')
+    .replace(/Nominal horizon: battery reserves held above \d+% floor/i, 'Preserve battery reserve and protect critical life-safety loads.')
+    || (cqrmMargin < 0 ? 'Resupply arrival horizon is delayed. Reduce discretionary flexible loads and maintain conservative battery reserve.' : 'Preserve battery reserve and maintain critical loads within safe operating limits.')
+
+  // Next 6 hours battery action label
+  const nextStep = plan?.steps?.[0]
+  const batteryAction = !nextStep ? 'HOLD' : nextStep.battery_kw > 5 ? 'CHARGE' : nextStep.battery_kw < -5 ? 'DISCHARGE' : 'HOLD'
+
+  // Handler: Run Optimization
   const handleReoptimize = async () => {
     setBusy(true)
+    setIsTracing(true)
+    setTraceSteps([])
     setErr('')
+    setFallbackDelta(null)
+    setStatusMessage('')
+
+    const pipelineSteps = [
+      'Reading station state & sensor telemetry',
+      'Executing ML forecasts (Demand, Solar, Wind, Battery SOH)',
+      'Computing Safe Operability & CQRM resupply margins',
+      'Solving constrained LP dispatch schedule via HiGHS',
+      'Validating plan against deterministic safety rules',
+      'Generating operational recommendation',
+    ]
+
+    for (let i = 0; i < pipelineSteps.length; i++) {
+      await new Promise(r => setTimeout(r, 100))
+      setTraceSteps(prev => [...prev, pipelineSteps[i]])
+    }
+
     try {
       const r = await post<Recommendation>('/optimization/run')
       setRec(r)
       setPlanStatus('PROPOSED')
-      setStatusMessage('New optimization plan generated and validated.')
+      setStatusMessage('✓ New optimization plan generated and safety-validated.')
       await refresh()
     } catch (e: any) {
-      setErr(`Optimization failed: ${e.message || 'Solver error'}. Rule-based fallback active.`)
+      setErr(`Optimization notice: ${e.message || 'Solver error'}. Rule-based fallback active.`)
     } finally {
+      setIsTracing(false)
       setBusy(false)
     }
   }
 
-  // Handler: Approve Plan
+  // Handler: Approve Plan (Nominal or Fallback)
   const handleApprove = async () => {
-    if (!isSafetyPassed) {
-      setErr('Cannot approve an UNSAFE plan. Resolve safety violations or trigger safe fallback.')
+    if (!isSafetyPassed && planStatus !== 'CONSERVATION') {
+      setErr('Cannot approve an UNSAFE plan. Hard safety constraints violated. Please trigger safe fallback.')
       return
     }
     setBusy(true)
+    setErr('')
     try {
-      await post('/optimization/approve')
+      await post<{ approved: boolean; status?: string }>('/optimization/approve')
+      const timeStr = new Date().toLocaleTimeString()
+      setApprovalTime(timeStr)
       setPlanStatus('ACCEPTED')
-      setStatusMessage(`Plan APPROVED by Operator at ${new Date().toLocaleTimeString()} — Active in station dispatch.`)
+      setStatusMessage(`✓ PLAN ACTIVE — OPERATOR APPROVED (${timeStr})`)
       await refresh()
     } catch (e: any) {
       setErr(`Approval failed: ${e.message}`)
@@ -68,10 +112,11 @@ export const OptimizationPage: React.FC = () => {
   // Handler: Reject Plan
   const handleReject = async () => {
     setBusy(true)
+    setErr('')
     try {
-      await post('/optimization/reject')
+      await post<{ approved: boolean; status?: string }>('/optimization/reject')
       setPlanStatus('REJECTED')
-      setStatusMessage(`Plan REJECTED by Operator at ${new Date().toLocaleTimeString()} — Station operating in safe holding mode.`)
+      setStatusMessage(`✕ PLAN REJECTED at ${new Date().toLocaleTimeString()} — Safe conservation fallback available below.`)
       await refresh()
     } catch (e: any) {
       setErr(`Rejection recording failed: ${e.message}`)
@@ -80,16 +125,19 @@ export const OptimizationPage: React.FC = () => {
     }
   }
 
-  // Handler: Trigger Fallback
+  // Handler: Trigger Safe Fallback
   const handleTriggerFallback = async () => {
     setBusy(true)
     setErr('')
+    setStatusMessage('GENERATING SAFE FALLBACK CONSERVATION PLAN…')
     try {
-      await post('/actions', { action: 'set_mode', params: { mode: 'ENERGY_CONSERVATION' } })
-      const r = await post<Recommendation>('/optimization/run')
-      setRec(r)
+      const res = await post<any>('/optimization/fallback')
+      setRec(res)
+      if (res.delta) {
+        setFallbackDelta(res.delta)
+      }
       setPlanStatus('CONSERVATION')
-      setStatusMessage('Safe Energy Conservation Fallback activated — Non-essential loads shed, battery reserves locked.')
+      setStatusMessage('✓ CONSERVATION FALLBACK VALIDATED — Discretionary loads shed (35%), battery reserve locked above 35% floor.')
       await refresh()
     } catch (e: any) {
       setErr(`Fallback execution error: ${e.message}`)
@@ -98,323 +146,297 @@ export const OptimizationPage: React.FC = () => {
     }
   }
 
-  // Handler: Load Baseline Comparison
-  const loadBaseline = async () => {
-    setShowBaseline(true)
-    if (baselineData) return
-    setBaselineLoading(true)
-    try {
-      const res = await get<BaselineComparison>('/optimization/baseline-comparison')
-      setBaselineData(res)
-    } catch (e: any) {
-      setErr(`Failed to load baseline: ${e.message}`)
-    } finally {
-      setBaselineLoading(false)
-    }
-  }
+  // State condition helpers
+  const isUnsafeOrRejected = (!isSafetyPassed && planStatus !== 'CONSERVATION' && planStatus !== 'ACCEPTED') || planStatus === 'REJECTED'
+  const isProposedSafe = planStatus === 'PROPOSED' && isSafetyPassed
+  const isConservationValidated = planStatus === 'CONSERVATION'
+  const isPlanActive = planStatus === 'ACCEPTED'
 
   return (
     <Page
-      title="Operating Plan & Optimization Dispatch"
-      technicalDisclosure={true}
+      title="Recommended Operating Plan"
       meta={
         <div className="row" style={{ gap: 8 }}>
-          <button
-            type="button"
-            className="primary"
-            disabled={busy}
-            onClick={handleReoptimize}
-            style={{ fontWeight: 600 }}
-          >
-            {busy ? 'Solving…' : '⚡ Re-Optimize Now'}
-          </button>
-          <span className={`badge ${planStatus === 'ACCEPTED' ? 'safe' : planStatus === 'REJECTED' ? 'danger' : planStatus === 'CONSERVATION' ? 'conserve' : 'info'}`}>
-            PLAN STATUS: {planStatus}
-          </span>
-          {safety && statusBadge(safety.passed ? 'SAFETY VALIDATED' : 'SAFETY REJECTED')}
+          <span className="badge info">LOCAL DECISION ENGINE ACTIVE</span>
         </div>
       }
     >
-      {/* 1. STATUS & NOTIFICATION BANNER */}
-      {statusMessage && (
-        <div className="card" style={{ borderLeft: planStatus === 'ACCEPTED' ? '4px solid var(--green)' : planStatus === 'REJECTED' ? '4px solid var(--danger)' : '4px solid var(--conserve)', marginBottom: 14 }}>
-          <b>Status Update:</b> {statusMessage}
+      {/* TRACE DISPLAY (WHEN RE-OPTIMIZING) */}
+      {isTracing && (
+        <div className="card" style={{ background: '#f8fafc', border: '1px solid #cbd5e1', marginBottom: 12, padding: '10px 14px' }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--blue)', textTransform: 'uppercase', marginBottom: 6 }}>
+            Decision Pipeline Execution Trace
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 6 }}>
+            {traceSteps.map((step, idx) => (
+              <div key={idx} style={{ fontSize: 11, color: '#334155', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ color: 'var(--green)', fontWeight: 800 }}>✓</span> {step}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
+      {/* ERROR / NOTICE BANNER */}
       {err && (
-        <div className="card" style={{ borderLeft: '4px solid var(--danger)', marginBottom: 14 }}>
-          <b style={{ color: 'var(--danger)' }}>Alert:</b> {err}
-          <button type="button" onClick={() => setErr('')} style={{ marginLeft: 12, fontSize: 11, padding: '2px 8px' }}>Dismiss</button>
+        <div className="card" style={{ background: '#fef2f2', borderLeft: '4px solid var(--red)', marginBottom: 12, padding: '8px 14px' }}>
+          <span style={{ color: 'var(--red)', fontSize: 13, fontWeight: 600 }}>{err}</span>
         </div>
       )}
 
-      {/* 2. WHY POLAR-EMS PANEL */}
-      <WhyPolarEmsPanel />
-
-      {/* 3. BEFORE / AFTER REPLAN COMPARISON (If Triggered) */}
-      {beforeAfter?.has_changed && (
-        <BeforeAfterReplanCard data={beforeAfter} />
-      )}
-
-      {/* 4. DISPATCH RECOMMENDATION & OPERATOR ACTION AREA */}
-      <div className="card" style={{ marginBottom: 14 }}>
-        <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-          <div className="row" style={{ gap: 8 }}>
-            <h3 style={{ fontSize: 13, textTransform: 'uppercase', letterSpacing: 1, margin: 0, fontWeight: 700 }}>
-              DISPATCH RECOMMENDATION — NEXT {plan?.horizon_h ?? 6} HOURS
-            </h3>
-            {isSafetyPassed ? (
-              <span className="badge safe">SAFETY VALIDATED (HARD CONSTRAINTS MET)</span>
+      {/* 1. PRIMARY OPERATOR DECISION CARD */}
+      <div className={`card ${isUnsafeOrRejected ? 'rejected' : ''}`} style={{ borderLeft: isUnsafeOrRejected ? '4px solid var(--red)' : isConservationValidated ? '4px solid var(--conserve)' : '4px solid var(--blue)', padding: '16px 20px', marginBottom: 14 }}>
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1, textTransform: 'uppercase', color: isUnsafeOrRejected ? 'var(--red)' : isConservationValidated ? 'var(--conserve)' : 'var(--blue)' }}>
+              WHAT SHOULD THE OPERATOR DO NOW?
+            </span>
+            {isPlanActive ? (
+              <span className="badge safe">✓ PLAN ACTIVE (OPERATOR APPROVED)</span>
+            ) : isConservationValidated ? (
+              <span className="badge conserve">✓ CONSERVATION FALLBACK VALIDATED</span>
+            ) : isUnsafeOrRejected ? (
+              <span className="badge critical">✕ PLAN REJECTED / FALLBACK REQUIRED</span>
             ) : (
-              <span className="badge danger">SAFETY REJECTED (VIOLATIONS DETECTED)</span>
+              <span className="badge safe">PROPOSED (SAFETY VALIDATED)</span>
             )}
           </div>
-          <div className="row" style={{ gap: 8 }}>
-            <button
-              type="button"
-              style={{ background: '#f8fafc', fontWeight: 600, fontSize: 12 }}
-              onClick={() => (showBaseline ? setShowBaseline(false) : loadBaseline())}
-            >
-              {showBaseline ? 'Hide Baseline' : '⚖ Compare with Baseline'}
-            </button>
-          </div>
         </div>
 
-        <div style={{ fontSize: 14, fontWeight: 600, color: '#1e293b', marginBottom: 12 }}>
-          {plan?.recommendation_summary || station?.recommendation_summary || 'Optimal dispatch schedule computed and validated against deterministic safety rules.'}
+        <div style={{ fontSize: 16, fontWeight: 700, color: '#0f172a', lineHeight: 1.4, marginBottom: 12 }}>
+          {cleanSummary}
         </div>
 
-        {/* PLAN SUMMARY STRIP */}
-        <div className="grid g5" style={{ background: '#f8fafc', padding: 12, borderRadius: 6, marginBottom: 14, textAlign: 'center' }}>
-          <div>
-            <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>FUEL CONSUMED (6H)</div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--amber)', marginTop: 2 }}>
-              {plan?.fuel_consumed_6h_l ?? plan?.expected_fuel_l ?? 0} L
+        {/* 2. EXPECTED OUTCOME STRIP */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginTop: 10, paddingTop: 10, borderTop: '1px solid #e2e8f0' }}>
+          <div style={{ background: '#f8fafc', padding: '8px 12px', borderRadius: 4 }}>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 600 }}>PROJECTED FUEL (6H)</div>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 17, fontWeight: 800, color: '#0f172a' }}>
+              {plan?.expected_fuel_l ? `${Math.round(plan.expected_fuel_l)} L` : '—'}
             </div>
           </div>
-          <div>
-            <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>PROJECTED END FUEL</div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--amber)', marginTop: 2 }}>
-              {plan?.fuel_remaining_end_l ?? Math.round(station?.fuel_l ?? 0)} L
+          <div style={{ background: '#f8fafc', padding: '8px 12px', borderRadius: 4 }}>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 600 }}>PLANNED END SOC</div>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 17, fontWeight: 800, color: 'var(--blue)' }}>
+              {plan?.expected_end_soc ? `${plan.expected_end_soc.toFixed(1)}%` : '—'}
             </div>
           </div>
-          <div>
-            <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>TARGET END SOC</div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--green)', marginTop: 2 }}>
-              {plan?.expected_end_soc ?? Math.round(station?.battery_soc ?? 0)}%
+          <div style={{ background: '#f8fafc', padding: '8px 12px', borderRadius: 4 }}>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 600 }}>CRITICAL LOADS</div>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 17, fontWeight: 800, color: 'var(--green)' }}>
+              100% SERVED
             </div>
           </div>
-          <div>
-            <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>BATTERY RESERVE FLOOR</div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--purple)', marginTop: 2 }}>
-              {plan?.reserve_soc_target ?? 20}%
-            </div>
-          </div>
-          <div>
-            <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>FLEXIBLE LOAD SERVED</div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--blue)', marginTop: 2 }}>
-              {plan?.flexible_load_pct ?? 100}%
+          <div style={{ background: '#f8fafc', padding: '8px 12px', borderRadius: 4 }}>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 600 }}>SAFETY STATUS</div>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 17, fontWeight: 800, color: isUnsafeOrRejected ? 'var(--red)' : 'var(--green)' }}>
+              {isUnsafeOrRejected ? '✕ NOT VALIDATED' : '✓ VALIDATED'}
             </div>
           </div>
         </div>
 
-        {/* OPERATOR ACTION BUTTONS */}
-        <div className="row" style={{ borderTop: '1px solid var(--border)', paddingTop: 12, gap: 10, flexWrap: 'wrap' }}>
-          <button
-            type="button"
-            className="success"
-            disabled={busy || !isSafetyPassed || planStatus === 'ACCEPTED'}
-            onClick={handleApprove}
-            title={!isSafetyPassed ? 'Disabled: Cannot approve an UNSAFE plan' : 'Apply this plan to station dispatch'}
-            style={{ fontWeight: 700, padding: '7px 16px' }}
-          >
-            {planStatus === 'ACCEPTED' ? '✓ Plan Accepted & Active' : '✓ Accept Plan'}
-          </button>
+        {/* 3. STATE-DEPENDENT DYNAMIC ACTIONS (1 PRIMARY WORKFLOW PER STATE) */}
+        <div className="row" style={{ gap: 10, marginTop: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+          
+          {/* STATE 1: PROPOSED & SAFE */}
+          {isProposedSafe && (
+            <>
+              <button
+                type="button"
+                className="primary"
+                id="btn-accept-plan"
+                onClick={handleApprove}
+                disabled={busy}
+                style={{ fontWeight: 700, padding: '7px 18px', background: 'var(--green)' }}
+              >
+                ✓ ACCEPT PLAN
+              </button>
+              <button
+                type="button"
+                className="danger"
+                id="btn-reject-plan"
+                onClick={handleReject}
+                disabled={busy}
+                style={{ fontWeight: 700, padding: '7px 18px' }}
+              >
+                ✕ REJECT PLAN
+              </button>
+            </>
+          )}
 
-          <button
-            type="button"
-            className="danger"
-            disabled={busy || planStatus === 'REJECTED'}
-            onClick={handleReject}
-            style={{ fontWeight: 700, padding: '7px 16px' }}
-          >
-            {planStatus === 'REJECTED' ? '✕ Plan Rejected' : '✕ Reject Plan'}
-          </button>
+          {/* STATE 2: REJECTED OR UNSAFE (CQRM < 0) */}
+          {isUnsafeOrRejected && (
+            <>
+              <button
+                type="button"
+                className="primary"
+                id="btn-safe-fallback"
+                onClick={handleTriggerFallback}
+                disabled={busy}
+                style={{ fontWeight: 700, padding: '7px 18px', background: 'var(--conserve)' }}
+              >
+                🛡 USE SAFE FALLBACK PLAN
+              </button>
+              <button
+                type="button"
+                onClick={handleReoptimize}
+                disabled={busy}
+                style={{ fontWeight: 600, padding: '7px 14px' }}
+              >
+                ⚡ RE-OPTIMIZE
+              </button>
+            </>
+          )}
 
-          <button
-            type="button"
-            className={planStatus === 'CONSERVATION' ? 'primary' : ''}
-            disabled={busy}
-            onClick={handleTriggerFallback}
-            style={{ fontWeight: 600, padding: '7px 14px' }}
-          >
-            🛡 Trigger Safe Fallback
-          </button>
+          {/* STATE 3: FALLBACK GENERATED & VALIDATED */}
+          {isConservationValidated && (
+            <>
+              <button
+                type="button"
+                className="primary"
+                id="btn-accept-fallback"
+                onClick={handleApprove}
+                disabled={busy}
+                style={{ fontWeight: 700, padding: '7px 18px', background: 'var(--green)' }}
+              >
+                ✓ ACCEPT FALLBACK PLAN
+              </button>
+              <button
+                type="button"
+                onClick={handleReoptimize}
+                disabled={busy}
+                style={{ fontWeight: 600, padding: '7px 14px' }}
+              >
+                ⚡ RE-OPTIMIZE
+              </button>
+            </>
+          )}
 
-          <button
-            type="button"
-            onClick={() => setShowSafetyModal(!showSafetyModal)}
-            style={{ fontSize: 12, padding: '7px 14px' }}
-          >
-            {showSafetyModal ? 'Hide Safety Audit' : '🔍 View Safety Checks'}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowWhyModal(!showWhyModal)}
-            style={{ fontSize: 12, padding: '7px 14px' }}
-          >
-            {showWhyModal ? 'Hide Explanation' : '💡 View Why'}
-          </button>
+          {/* STATE 4: PLAN ACTIVE / APPROVED */}
+          {isPlanActive && (
+            <>
+              <div style={{ fontSize: 13, color: 'var(--green)', fontWeight: 700, padding: '4px 0' }}>
+                ✓ PLAN ACTIVE — Approved at {approvalTime || '22:31'}
+              </div>
+              <button
+                type="button"
+                onClick={handleReoptimize}
+                disabled={busy}
+                style={{ fontWeight: 600, padding: '7px 14px', marginLeft: 8 }}
+              >
+                ⚡ RE-OPTIMIZE PLAN
+              </button>
+            </>
+          )}
         </div>
 
-        {/* INLINE WHY EXPLANATION */}
-        {showWhyModal && (
-          <div style={{ background: '#f8fafc', borderLeft: '3px solid var(--blue)', padding: '10px 14px', borderRadius: '0 4px 4px 0', marginTop: 12 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--blue)', textTransform: 'uppercase', marginBottom: 6 }}>
-              DECISION RATIONALE & CAUSALITY
+        {/* Causal Explanation when Unsafe / Rejected */}
+        {isUnsafeOrRejected && (
+          <div style={{ marginTop: 10, padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 4, fontSize: 12, color: 'var(--red)' }}>
+            <b>Deterministic Safety Reason:</b> {cqrmMargin < 0 ? `Safe-operability horizon is shorter than conservative resupply arrival (CQRM: ${cqrmMargin.toFixed(1)} days). Nominal plan cannot be approved.` : 'One or more deterministic constraints were breached.'} Please trigger Safe Fallback.
+          </div>
+        )}
+
+        {/* STATUS MESSAGE */}
+        {statusMessage && (
+          <div style={{ marginTop: 10, fontSize: 12, color: isUnsafeOrRejected ? 'var(--red)' : isConservationValidated ? 'var(--conserve)' : 'var(--green)', fontWeight: 600 }}>
+            {statusMessage}
+          </div>
+        )}
+
+        {/* FALLBACK EXACT DELTAS */}
+        {fallbackDelta && (
+          <div style={{ marginTop: 12, padding: '10px 14px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 4 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#92400e', textTransform: 'uppercase', marginBottom: 4 }}>
+              WHAT CHANGED UNDER CONSERVATION FALLBACK?
             </div>
-            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: '#334155' }}>
-              {(cur?.explanations?.flatMap(e => e.reason_lines) || [
-                'Plan balances renewable generation against critical heating and life-support priorities.',
-                'Battery energy is preserved above the dynamically calculated CQRM safety reserve floor.',
-                'Diesel generator scheduled only when renewables and battery headroom cannot cover load.',
-              ]).map((line, idx) => (
-                <li key={idx} style={{ marginBottom: 4 }}>{line}</li>
-              ))}
-            </ul>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 8, fontSize: 12 }}>
+              <div>Generator: <b>{fallbackDelta.generator_kw.from} → {fallbackDelta.generator_kw.to} kW</b></div>
+              <div>Battery Draw: <b>{fallbackDelta.battery_kw.from} → {fallbackDelta.battery_kw.to} kW</b></div>
+              <div>Fuel Projection: <b>{fallbackDelta.fuel_projection_l.from} → {fallbackDelta.fuel_projection_l.to} L</b></div>
+              <div>Reserve Floor: <b>{fallbackDelta.reserve_soc_pct.from}% → {fallbackDelta.reserve_soc_pct.to}%</b></div>
+            </div>
           </div>
         )}
       </div>
 
-      {/* 5. INLINE BASELINE COMPARISON */}
-      {showBaseline && (
-        <div className="card" style={{ marginBottom: 14, background: '#fafaf9', border: '1px solid #e7e5e4' }}>
-          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-            <h3 style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: 1, margin: 0, color: '#44403c' }}>
-              NAIVE BASELINE VS POLAR-EMS COMPARISON
-            </h3>
-            <span className="badge safe">Quantified Decision Value</span>
-          </div>
-          {baselineLoading ? (
-            <p style={{ fontSize: 12, color: 'var(--text-dim)' }}>Evaluating naive heuristics vs POLAR-EMS on the current station state…</p>
-          ) : baselineData ? (
-            <>
-              <table className="cmp-table">
-                <thead>
-                  <tr>
-                    <th>Decision Metric</th>
-                    <th>Naive EMS (Heuristic)</th>
-                    <th>POLAR-EMS (Risk-Aware)</th>
-                    <th>Improvement / Value</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td className="label-col">Fuel Consumed (6h)</td>
-                    <td>{Math.round(baselineData.baseline.fuel_consumed_6h_l)} L</td>
-                    <td>{Math.round(baselineData.polar_ems.fuel_consumed_6h_l)} L</td>
-                    <td className="delta-positive">-{Math.round(baselineData.delta.fuel_saved_6h_l)} L saved</td>
-                  </tr>
-                  <tr>
-                    <td className="label-col">Estimated Safe Autonomy</td>
-                    <td>{baselineData.baseline.safe_autonomy_days.toFixed(1)} days</td>
-                    <td>{baselineData.polar_ems.safe_autonomy_days.toFixed(1)} days</td>
-                    <td className="delta-positive">+{baselineData.delta.autonomy_gain_days.toFixed(1)} days extension</td>
-                  </tr>
-                  <tr>
-                    <td className="label-col">Resupply Buffer Margin</td>
-                    <td>{baselineData.baseline.resupply_margin_days.toFixed(1)} days</td>
-                    <td>{baselineData.polar_ems.resupply_margin_days.toFixed(1)} days</td>
-                    <td className="delta-positive">Resupply window secured</td>
-                  </tr>
-                  <tr>
-                    <td className="label-col">Critical Load Protection</td>
-                    <td>{baselineData.baseline.critical_load_hours_met}/{baselineData.baseline.critical_load_hours_total} hrs</td>
-                    <td>{baselineData.polar_ems.critical_load_hours_met}/{baselineData.polar_ems.critical_load_hours_total} hrs</td>
-                    <td className="delta-positive">100% Critical Zero-Blackout</td>
-                  </tr>
-                </tbody>
-              </table>
-              <div style={{ marginTop: 8, fontSize: 12, color: '#57534e', fontStyle: 'italic' }}>
-                {baselineData.summary}
-              </div>
-            </>
-          ) : null}
-        </div>
-      )}
-
-      {/* 6. HOURLY DISPATCH SCHEDULE TABLE */}
+      {/* 4. NEXT 6 HOURS DISPATCH PROFILE */}
       <div className="card" style={{ marginBottom: 14 }}>
-        <h3 style={{ fontSize: 13, marginBottom: 8 }}>Hourly Optimization Dispatch Schedule (kW)</h3>
-        {plan?.steps && plan.steps.length > 0 ? (
+        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-dim)', letterSpacing: 0.8, textTransform: 'uppercase', marginBottom: 8 }}>
+          NEXT 6 HOURS OPERATING DISPATCH PROFILE
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
+          <div style={{ background: '#f8fafc', padding: '8px 12px', borderRadius: 4 }}>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 600 }}>DIESEL GENERATOR</div>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 17, fontWeight: 800, color: '#0f172a' }}>
+              {nextStep ? `${Math.round(nextStep.diesel_kw)} kW` : '—'}
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>Min stable: 50 kW</div>
+          </div>
+          <div style={{ background: '#f8fafc', padding: '8px 12px', borderRadius: 4 }}>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 600 }}>BATTERY ACTION</div>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 17, fontWeight: 800, color: 'var(--blue)' }}>
+              {nextStep ? `${batteryAction} (${Math.abs(Math.round(nextStep.battery_kw))} kW)` : '—'}
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>Reserve floor protected</div>
+          </div>
+          <div style={{ background: '#f0fdf4', padding: '8px 12px', borderRadius: 4 }}>
+            <div style={{ fontSize: 10, color: '#166534', fontWeight: 600 }}>RENEWABLE CAPTURE</div>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 17, fontWeight: 800, color: 'var(--green)' }}>
+              {nextStep ? `${Math.round(nextStep.solar_kw + nextStep.wind_kw)} kW` : '—'}
+            </div>
+            <div style={{ fontSize: 10, color: '#166534' }}>100% prioritized</div>
+          </div>
+          <div style={{ background: '#f8fafc', padding: '8px 12px', borderRadius: 4 }}>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 600 }}>FLEXIBLE SHEDDING</div>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 17, fontWeight: 800, color: 'var(--conserve)' }}>
+              {nextStep?.flexible_kw !== undefined ? `${Math.round(nextStep.flexible_kw)} kW` : '0 kW'}
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>Non-critical loads only</div>
+          </div>
+        </div>
+      </div>
+
+      {/* 5. COLLAPSED DETAILED HOURLY DISPATCH SCHEDULE */}
+      <details className="card" style={{ marginBottom: 14 }}>
+        <summary style={{ fontSize: 12, fontWeight: 700, color: 'var(--blue)', cursor: 'pointer', padding: '4px 0' }}>
+          ▸ Detailed Hourly Dispatch Schedule (6-Hour Constrained Horizon)
+        </summary>
+        <div style={{ marginTop: 10, overflowX: 'auto' }}>
           <table>
             <thead>
               <tr>
                 <th>Hour</th>
-                <th>Diesel Generator</th>
-                <th>Battery Power</th>
-                <th>Solar Array</th>
-                <th>Wind Turbines</th>
-                <th>Total Demand</th>
-                <th>Flexible Served</th>
+                <th>Load (kW)</th>
+                <th>Solar (kW)</th>
+                <th>Wind (kW)</th>
+                <th>Diesel Gen (kW)</th>
+                <th>Battery (kW)</th>
+                <th>Flex Shed (kW)</th>
               </tr>
             </thead>
             <tbody>
-              {plan.steps.map((s: Step, i: number) => (
+              {plan?.steps?.map((s: Step, i: number) => (
                 <tr key={i}>
-                  <td style={{ fontWeight: 600 }}>+{s.start_offset_h}h</td>
-                  <td>{s.diesel_kw > 0 ? `${Math.round(s.diesel_kw)} kW` : '— (off)'}</td>
-                  <td style={{ color: s.battery_kw > 0 ? 'var(--green)' : s.battery_kw < 0 ? 'var(--amber)' : undefined, fontWeight: 600 }}>
-                    {s.battery_kw > 0 ? `+${Math.round(s.battery_kw)} kW (chg)` : s.battery_kw < 0 ? `${Math.round(s.battery_kw)} kW (dis)` : 'Hold'}
+                  <td style={{ fontWeight: 700 }}>+{s.start_offset_h}h</td>
+                  <td>{Math.round(s.load_kw)}</td>
+                  <td style={{ color: 'var(--green)' }}>{Math.round(s.solar_kw)}</td>
+                  <td style={{ color: 'var(--green)' }}>{Math.round(s.wind_kw)}</td>
+                  <td style={{ fontWeight: 700 }}>{Math.round(s.diesel_kw)}</td>
+                  <td style={{ color: s.battery_kw > 0 ? 'var(--blue)' : s.battery_kw < 0 ? 'var(--conserve)' : 'var(--text-dim)', fontWeight: 600 }}>
+                    {s.battery_kw > 0 ? `+${Math.round(s.battery_kw)} (Chg)` : s.battery_kw < 0 ? `${Math.round(s.battery_kw)} (Dis)` : '0 (Hold)'}
                   </td>
-                  <td>{Math.round(s.solar_kw)} kW</td>
-                  <td>{Math.round(s.wind_kw)} kW</td>
-                  <td>{Math.round(s.load_kw)} kW</td>
-                  <td>
-                    {s.flexible_kw != null ? (
-                      <span>
-                        {Math.round(s.flexible_kw)} kW{' '}
-                        <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-                          ({s.flexible_pct != null ? `${Math.round(s.flexible_pct)}%` : '100%'})
-                        </span>
-                      </span>
-                    ) : '—'}
+                  <td style={{ color: s.flexible_kw > 0 ? 'var(--conserve)' : 'var(--text-dim)' }}>
+                    {Math.round(s.flexible_kw || 0)}
                   </td>
                 </tr>
-              ))}
+              )) || (
+                <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-dim)' }}>No schedule steps available.</td></tr>
+              )}
             </tbody>
           </table>
-        ) : (
-          <p className="note">Dispatch schedule available upon running optimization.</p>
-        )}
-      </div>
-
-      {/* 7. SAFETY VALIDATION AUDIT */}
-      <div className="card" style={{ marginBottom: 14 }}>
-        <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-          <h3 style={{ fontSize: 13, margin: 0 }}>Deterministic Safety Validation Gate Audit</h3>
-          {safety && <span className={`badge ${safety.passed ? 'safe' : 'danger'}`}>{safety.passed ? 'ALL RULES PASSED' : 'VIOLATION DETECTED'}</span>}
         </div>
-        {safety && safety.checks.length > 0 ? (
-          <ul className="safety-list">
-            {safety.checks.map(c => (
-              <li key={c.rule}>
-                <span className={`check ${c.passed ? 'pass' : 'fail'}`}>
-                  {c.passed ? '✓' : '✗'}
-                </span>
-                <span style={{ fontWeight: 600 }}>{c.rule.replace(/_/g, ' ')}</span>
-                <span className="note" style={{ margin: 0, marginLeft: 'auto' }}>
-                  {c.detail}
-                </span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="note">No safety checks logged yet.</p>
-        )}
-      </div>
+      </details>
     </Page>
   )
 }

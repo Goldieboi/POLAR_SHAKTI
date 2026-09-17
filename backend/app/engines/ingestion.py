@@ -10,7 +10,10 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from ..state.system_state import STATE
+try:
+    from ..state.system_state import STATE
+except (ImportError, ValueError):
+    from app.state.system_state import STATE
 
 TOPICS = [
     "station/power/load",

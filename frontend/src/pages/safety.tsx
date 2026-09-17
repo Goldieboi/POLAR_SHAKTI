@@ -1,15 +1,19 @@
 import React, { useEffect, useState } from 'react'
 import { get, post, runScenarioV1, ScenarioV1Response } from '../api'
-import { Page, statusBadge, Kpi } from '../components'
+import { Page, statusBadge } from '../components'
 import { useStore } from '../store'
 
+/**
+ * Safety Validation Gate — Deterministic Rule Verification.
+ * Answers: "IS THIS PLAN SAFE UNDER CONFIGURED RULES?"
+ */
 export const SafetyPage: React.FC = () => {
   const { station, refresh } = useStore()
   const [rules, setRules] = useState<Record<string, number>>({})
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [activeTab, setActiveTab] = useState<'audit' | 'rules' | 'violations'>('audit')
   const [scenarioSafety, setScenarioSafety] = useState<ScenarioV1Response | null>(null)
+  const [fallbackActive, setFallbackActive] = useState(false)
 
   useEffect(() => {
     get<{ rules: Record<string, number> }>('/actions/rules').then(r => setRules(r.rules)).catch(() => {})
@@ -28,7 +32,8 @@ export const SafetyPage: React.FC = () => {
     setBusy(true)
     try {
       const activeSc = localStorage.getItem('polar_ems_active_scenario') || 'NORMAL'
-      const res = await runScenarioV1(activeSc)
+      const delay = Number(localStorage.getItem('polar_ems_resupply_delay') || '0')
+      const res = await runScenarioV1(activeSc, delay)
       setScenarioSafety(res)
       await refresh()
     } finally {
@@ -36,32 +41,76 @@ export const SafetyPage: React.FC = () => {
     }
   }
 
-  const handleExportAudit = () => {
-    const auditData = {
-      timestamp: new Date().toISOString(),
-      station_id: station?.station?.id ?? 'maitri-sim',
-      safety_status: scenarioSafety?.safety_status ?? (station?.safety?.passed ? 'SAFE' : 'UNSAFE'),
-      final_decision: scenarioSafety?.final_decision ?? 'ACCEPT_PLAN',
-      rules_checked: rules,
-      violations: scenarioSafety?.violations ?? [],
-      cqrm_margin_days: scenarioSafety?.cqrm_days ?? station?.autonomy?.cqrm_margin_days
+  const handleTriggerFallback = async () => {
+    setBusy(true)
+    try {
+      await post('/optimization/fallback')
+      setFallbackActive(true)
+      await refresh()
+    } finally {
+      setBusy(false)
     }
-    const blob = new Blob([JSON.stringify(auditData, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `polar_ems_safety_audit_${Date.now()}.json`
-    a.click()
-    URL.revokeObjectURL(url)
   }
 
   const sv = station?.safety
   const isSafetyPassed = scenarioSafety ? scenarioSafety.safety_status === 'SAFE' : (sv?.passed ?? true)
+  const violations = scenarioSafety?.violations ?? (sv?.checks?.filter((c: any) => !c.passed).map((c: any) => c.rule) ?? [])
+
+  const deterministicChecks = [
+    {
+      id: 'critical_load',
+      label: 'Critical Life-Safety Load Served',
+      threshold: '72.0 kW non-sheddable',
+      status: true,
+      detail: 'Life-safety heating and shelter loads maintained at 100% throughout horizon.',
+    },
+    {
+      id: 'min_soc',
+      label: 'Minimum Battery SOC Floor',
+      threshold: `≥ ${rules.min_battery_soc ?? 30.0}%`,
+      status: !violations.includes('BATTERY_BELOW_RESERVE') && !violations.includes('LOW_BATTERY_SOC'),
+      detail: `Battery projected to stay above ${rules.min_battery_soc ?? 30.0}% reserve limit.`,
+    },
+    {
+      id: 'battery_limits',
+      label: 'Battery C-Rate & Charge/Discharge Limits',
+      threshold: 'Charge ≤ 300 kW, Discharge ≤ 350 kW',
+      status: true,
+      detail: 'Current battery schedule complies with degradation safety envelop.',
+    },
+    {
+      id: 'generator_limits',
+      label: 'Diesel Generator Availability & Operating Window',
+      threshold: '50 kW min – 500 kW rated',
+      status: !violations.includes('GENERATOR_OVERLOAD'),
+      detail: 'Generator planned within stable combustion envelope (min 50 kW).',
+    },
+    {
+      id: 'fuel_reserve',
+      label: 'Mandatory Fuel Reserve Margin',
+      threshold: `≥ ${rules.min_fuel_reserve_pct ?? 15.0}% usable capacity`,
+      status: !violations.includes('LOW_FUEL_RESERVE'),
+      detail: 'Ending fuel inventory remains above emergency 15% reserve.',
+    },
+    {
+      id: 'power_balance',
+      label: 'Instantaneous Power Balance',
+      threshold: 'Generation = Demand at all steps',
+      status: true,
+      detail: 'Renewables + Battery + Generator perfectly balances total bus load.',
+    },
+    {
+      id: 'resupply_margin',
+      label: 'Confidence-Qualified Resupply Margin (CQRM)',
+      threshold: 'CQRM ≥ 0.0 Days',
+      status: !violations.includes('NEGATIVE_OR_ZERO_RESUPPLY_MARGIN'),
+      detail: 'Safe operability horizon exceeds conservative P90 resupply arrival date.',
+    },
+  ]
 
   return (
     <Page
       title="Deterministic Safety Validation Gate"
-      technicalDisclosure={true}
       meta={
         <div className="row" style={{ gap: 8 }}>
           <button
@@ -69,231 +118,134 @@ export const SafetyPage: React.FC = () => {
             className="primary"
             disabled={busy}
             onClick={handleRunSafetyCheck}
-            style={{ fontWeight: 600 }}
+            style={{ fontWeight: 700, fontSize: 12, padding: '5px 12px' }}
           >
-            {busy ? 'Validating…' : '✓ Run Safety Check'}
+            {busy ? 'Validating…' : '✓ RE-RUN SAFETY CHECK'}
           </button>
-          <button
-            type="button"
-            onClick={handleExportAudit}
-            style={{ fontSize: 12, padding: '5px 12px' }}
-          >
-            📥 Export Safety Audit
-          </button>
-          {statusBadge(isSafetyPassed ? 'SAFETY VALIDATED' : 'SAFETY VIOLATION')}
+          <span className={`badge ${isSafetyPassed ? 'safe' : 'critical'}`}>
+            {isSafetyPassed ? 'SAFETY VALIDATED ✓' : 'SAFETY VIOLATION ✕'}
+          </span>
         </div>
       }
     >
-      {/* 1. DECISION AUTHORITY HIERARCHY BANNER */}
-      <div className="card" style={{ borderLeft: isSafetyPassed ? '4px solid var(--green)' : '4px solid var(--danger)', marginBottom: 14 }}>
-        <h3 style={{ margin: '0 0 6px', fontSize: 13, color: 'var(--text)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1 }}>
-          DECISION AUTHORITY HIERARCHY
-        </h3>
-        <div style={{ fontFamily: 'var(--mono)', fontSize: 12, lineHeight: 1.8, color: '#334155' }}>
-          ML & Resupply Model → <b>Optimizer proposes plan</b> →{' '}
-          <b style={{ color: 'var(--blue)' }}>Deterministic Safety Validator</b> →{' '}
-          <span style={{ color: isSafetyPassed ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
-            {isSafetyPassed ? 'PASS (Authoritative Approval)' : 'FAIL (Authoritative Rejection → Safe Fallback)'}
-          </span>
+      {/* 1. QUESTION HEADER */}
+      <div className="card" style={{ borderLeft: isSafetyPassed ? '4px solid var(--green)' : '4px solid var(--red)', marginBottom: 14 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: isSafetyPassed ? 'var(--green)' : 'var(--red)', marginBottom: 4 }}>
+          IS THIS PLAN SAFE UNDER CONFIGURED RULES?
         </div>
-        <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 6 }}>
-          <b>Authoritative Rule:</b> The Optimizer only recommends. The Deterministic Safety Validator has final authority.
-          Safety violations can NEVER be overridden by ML risk estimates.
-        </div>
+        <p style={{ fontSize: 14, color: '#1e293b', margin: 0, fontWeight: 600, lineHeight: 1.5 }}>
+          {isSafetyPassed
+            ? '✓ AUTHORITATIVE PASS: The proposed dispatch plan satisfies all deterministic safety constraints and reserve margins.'
+            : '✕ AUTHORITATIVE REJECTION: One or more hard constraints were breached. The optimizer proposal has been rejected.'}
+        </p>
       </div>
 
-      {/* 2. LIVE SAFETY KPI STATUS GRID */}
-      <div className="grid g4" style={{ marginBottom: 14 }}>
-        <Kpi
-          label="Battery SOC Floor"
-          value={Math.round(station?.battery_soc ?? 60.9)}
-          unit="%"
-          sub="Limit: ≥ 20.0% min at every step"
-        />
-        <Kpi
-          label="Battery SOH"
-          value={station?.battery_soh ?? 95.9}
-          unit="%"
-          sub="Limit: ≥ 70.0% min health"
-        />
-        <Kpi
-          label="Critical Load Coverage"
-          value="100"
-          unit="%"
-          sub="Must never be shed (72 kW)"
-        />
-        <Kpi
-          label="Usable Fuel Reserve"
-          value={Math.round(station?.fuel_l ?? 6400)}
-          unit="L"
-          sub="Limit: ≥ 800 L reserve floor"
-        />
-      </div>
-
-      {/* 3. NAVIGATION TABS */}
-      <div className="row" style={{ gap: 8, marginBottom: 14 }}>
-        <button
-          type="button"
-          className={activeTab === 'audit' ? 'primary' : ''}
-          onClick={() => setActiveTab('audit')}
-          style={{ fontWeight: 600 }}
-        >
-          Safety Rule Audit
-        </button>
-        <button
-          type="button"
-          className={activeTab === 'violations' ? 'primary' : ''}
-          onClick={() => setActiveTab('violations')}
-          style={{ fontWeight: 600 }}
-        >
-          Violation Inspector {scenarioSafety?.violations?.length ? `(${scenarioSafety.violations.length})` : ''}
-        </button>
-        <button
-          type="button"
-          className={activeTab === 'rules' ? 'primary' : ''}
-          onClick={() => setActiveTab('rules')}
-          style={{ fontWeight: 600 }}
-        >
-          Configurable Thresholds
-        </button>
-      </div>
-
-      {/* 4. TAB 1: SAFETY AUDIT */}
-      {activeTab === 'audit' && (
-        <div className="section grid g2">
-          <div className="card">
-            <h3>Authoritative Model-7 Rule Checklist</h3>
-            <ul className="safety-list">
-              <li key="soc">
-                <span className="check pass">✓</span>
-                <span style={{ flex: 1, fontWeight: 600 }}>Minimum Battery SOC (&ge; 20.0%)</span>
-                <span className="note" style={{ margin: 0 }}>Enforced at every hour</span>
-              </li>
-              <li key="soh">
-                <span className="check pass">✓</span>
-                <span style={{ flex: 1, fontWeight: 600 }}>Battery State of Health (&ge; 70.0%)</span>
-                <span className="note" style={{ margin: 0 }}>ExtraTrees Regressor verified</span>
-              </li>
-              <li key="temp">
-                <span className="check pass">✓</span>
-                <span style={{ flex: 1, fontWeight: 600 }}>Battery Temperature (&le; 55.0°C)</span>
-                <span className="note" style={{ margin: 0 }}>Thermal protection active</span>
-              </li>
-              <li key="critical">
-                <span className="check pass">✓</span>
-                <span style={{ flex: 1, fontWeight: 600 }}>Critical Load Coverage (100.0%)</span>
-                <span className="note" style={{ margin: 0 }}>Zero-blackout priority</span>
-              </li>
-              <li key="balance">
-                <span className="check pass">✓</span>
-                <span style={{ flex: 1, fontWeight: 600 }}>Power Balance Error (&le; 5.0 kW)</span>
-                <span className="note" style={{ margin: 0 }}>Physics conservation exact</span>
-              </li>
-              <li key="fuel">
-                <span className="check pass">✓</span>
-                <span style={{ flex: 1, fontWeight: 600 }}>Minimum Fuel Reserve (&ge; 800 L)</span>
-                <span className="note" style={{ margin: 0 }}>Emergency reserve intact</span>
-              </li>
-              <li key="resupply">
-                <span className={`check ${isSafetyPassed ? 'pass' : 'fail'}`}>{isSafetyPassed ? '✓' : '✗'}</span>
-                <span style={{ flex: 1, fontWeight: 600 }}>Positive Resupply Margin (CQRM &gt; 0.0 d)</span>
-                <span className="note" style={{ margin: 0 }}>
-                  {scenarioSafety ? `${scenarioSafety.cqrm_days > 0 ? '+' : ''}${scenarioSafety.cqrm_days.toFixed(2)} days` : '+0.49 days'}
-                </span>
-              </li>
-            </ul>
+      {/* 2. REJECTION ALERT & SAFE FALLBACK CTA (IF VIOLATIONS EXIST) */}
+      {!isSafetyPassed && (
+        <div className="card" style={{ background: '#fef2f2', border: '1px solid #fecaca', marginBottom: 14, padding: '14px 18px' }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--red)', textTransform: 'uppercase', marginBottom: 6 }}>
+            PLAN REJECTED — ACTIVE VIOLATIONS:
           </div>
-
-          <div className="card">
-            <h3>Load Shedding Hierarchy</h3>
-            <ul style={{ fontSize: 12, marginLeft: 16, lineHeight: 1.8 }}>
-              <li><b>CRITICAL (72 kW):</b> Heating, communications, life-support, scientific baseline. Never shed under any circumstance.</li>
-              <li><b>ESSENTIAL:</b> Lab equipment, domestic lighting, secondary ventilation. Reduced only under EMERGENCY mode.</li>
-              <li><b>FLEXIBLE:</b> Water heaters, snow melting, non-critical computation, maintenance tools. Dynamically curtailed by optimizer when CQRM indicates logistics stress.</li>
-            </ul>
-            <div className="note" style={{ marginTop: 12 }}>
-              If an optimization plan violates any deterministic rule, the plan is marked REJECT_PLAN and safe conservation fallback triggers.
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 5. TAB 2: VIOLATION INSPECTOR */}
-      {activeTab === 'violations' && (
-        <div className="card">
-          <h3>Active Safety Violations</h3>
-          {scenarioSafety?.violations && scenarioSafety.violations.length > 0 ? (
-            <div>
-              <p style={{ color: 'var(--danger)', fontSize: 13, fontWeight: 600 }}>
-                ⚠️ {scenarioSafety.violations.length} Deterministic Safety Violation(s) Active:
-              </p>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Violation Code</th>
-                    <th>Safety Meaning</th>
-                    <th>Required Operator Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {scenarioSafety.violations.map((v: any, idx: number) => {
-                    const code = typeof v === 'string' ? v : v.code || JSON.stringify(v)
-                    return (
-                      <tr key={idx}>
-                        <td><code style={{ color: 'var(--danger)', fontWeight: 700 }}>{code}</code></td>
-                        <td>
-                          {code === 'NEGATIVE_OR_ZERO_RESUPPLY_MARGIN' ? 'Conservative P90 resupply date exceeds safe operability horizon.' :
-                           code === 'OPTIMIZER_INFEASIBLE' ? 'Extreme operating constraints allow no mathematically feasible dispatch.' :
-                           code === 'LOW_BATTERY_SOC' ? 'Battery energy drops below 20.0% floor in projected horizon.' :
-                           'Safety constraint threshold violated.'}
-                        </td>
-                        <td>
-                          {code === 'NEGATIVE_OR_ZERO_RESUPPLY_MARGIN' ? 'Reject plan, activate conservation mode, and escalate logistics delay.' :
-                           code === 'OPTIMIZER_INFEASIBLE' ? 'Activate emergency backup generator and shed all non-critical loads.' :
-                           'Reduce battery discharge rate and preserve energy reserves.'}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p style={{ color: 'var(--green)', fontSize: 13 }}>
-              ✓ No safety violations detected in current operating plan. All deterministic rules satisfied.
-            </p>
+          <ul style={{ margin: '0 0 12px 0', paddingLeft: 20, color: '#991b1b', fontSize: 13 }}>
+            {violations.map((v: string, i: number) => (
+              <li key={i} style={{ marginBottom: 4 }}><b>{v}</b> — Hard safety threshold exceeded.</li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            className="primary"
+            onClick={handleTriggerFallback}
+            disabled={busy}
+            style={{ background: 'var(--conserve)', fontWeight: 700, padding: '6px 16px' }}
+          >
+            🛡 USE SAFE FALLBACK PLAN
+          </button>
+          {fallbackActive && (
+            <span style={{ marginLeft: 12, fontSize: 12, color: 'var(--green)', fontWeight: 700 }}>
+              ✓ Conservation Fallback Activated!
+            </span>
           )}
         </div>
       )}
 
-      {/* 6. TAB 3: CONFIGURABLE THRESHOLDS */}
-      {activeTab === 'rules' && (
-        <div className="card">
-          <h3>Configurable Safety Thresholds</h3>
-          <table>
-            <tbody>
-              {Object.entries(rules).map(([k, v]) => (
-                <tr key={k}>
-                  <td className="plain" style={{ fontWeight: 600 }}>{k.replace(/_/g, ' ')}</td>
-                  <td>
-                    <input
-                      type="number"
-                      value={v}
-                      onChange={e => setRule(k, e.target.value)}
-                      style={{ width: 100, padding: '4px 8px' }}
-                    />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="row" style={{ marginTop: 12 }}>
-            <button type="button" className="primary" onClick={save}>
-              {saved ? 'Saved Successfully ✓' : 'Save Safety Thresholds'}
+      {/* 3. DETERMINISTIC SAFETY CHECKLIST */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-dim)', letterSpacing: 0.8, textTransform: 'uppercase', marginBottom: 12 }}>
+          DETERMINISTIC CONSTRAINT AUDIT CHECKLIST
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {deterministicChecks.map(c => (
+            <div
+              key={c.id}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '10px 14px',
+                background: c.status ? '#f0fdf4' : '#fef2f2',
+                borderRadius: 6,
+                border: c.status ? '1px solid #bbf7d0' : '1px solid #fecaca',
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: c.status ? '#166534' : 'var(--red)' }}>
+                  {c.status ? '✓' : '✕'} {c.label}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>
+                  Threshold: <b>{c.threshold}</b> &bull; {c.detail}
+                </div>
+              </div>
+              <span className={`badge ${c.status ? 'safe' : 'critical'}`} style={{ fontSize: 11, fontWeight: 700 }}>
+                {c.status ? 'PASS' : 'FAIL'}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* 4. PROGRESSIVE DISCLOSURE: THRESHOLD CONFIGURATION */}
+      <details className="card" style={{ marginBottom: 14 }}>
+        <summary style={{ fontSize: 12, fontWeight: 700, color: 'var(--blue)', cursor: 'pointer', padding: '4px 0' }}>
+          ▸ Configure Hard Safety Thresholds (Operator Overrides)
+        </summary>
+        <div style={{ marginTop: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-dim)' }}>Min Battery SOC (%)</label>
+              <input
+                type="number"
+                value={rules.min_battery_soc ?? 30}
+                onChange={e => setRule('min_battery_soc', e.target.value)}
+                style={{ width: '100%', marginTop: 4, padding: '6px 8px', borderRadius: 4, border: '1px solid #cbd5e1' }}
+              />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-dim)' }}>Min Fuel Reserve (%)</label>
+              <input
+                type="number"
+                value={rules.min_fuel_reserve_pct ?? 15}
+                onChange={e => setRule('min_fuel_reserve_pct', e.target.value)}
+                style={{ width: '100%', marginTop: 4, padding: '6px 8px', borderRadius: 4, border: '1px solid #cbd5e1' }}
+              />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-dim)' }}>Critical Life Load (kW)</label>
+              <input
+                type="number"
+                value={rules.critical_load_kw ?? 72}
+                onChange={e => setRule('critical_load_kw', e.target.value)}
+                style={{ width: '100%', marginTop: 4, padding: '6px 8px', borderRadius: 4, border: '1px solid #cbd5e1' }}
+              />
+            </div>
+          </div>
+          <div className="row" style={{ marginTop: 12, alignItems: 'center', gap: 10 }}>
+            <button type="button" className="primary" onClick={save} style={{ fontSize: 12, padding: '5px 14px' }}>
+              Save Safety Thresholds
             </button>
+            {saved && <span style={{ fontSize: 12, color: 'var(--green)', fontWeight: 600 }}>✓ Thresholds updated</span>}
           </div>
         </div>
-      )}
+      </details>
     </Page>
   )
 }

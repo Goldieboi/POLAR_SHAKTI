@@ -16,13 +16,22 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .. import db
-from ..config import SAFETY_RULES
-from ..state.system_state import STATE
-from . import forecast as fc
-from . import autonomy as au
-from . import optimizer as op
-from . import safety as sf
+try:
+    from .. import db
+    from ..config import SAFETY_RULES
+    from ..state.system_state import STATE
+    from . import forecast as fc
+    from . import autonomy as au
+    from . import optimizer as op
+    from . import safety as sf
+except (ImportError, ValueError):
+    from app import db
+    from app.config import SAFETY_RULES
+    from app.state.system_state import STATE
+    from app.engines import forecast as fc
+    from app.engines import autonomy as au
+    from app.engines import optimizer as op
+    from app.engines import safety as sf
 
 
 def _record_safety_events(sv: dict) -> None:

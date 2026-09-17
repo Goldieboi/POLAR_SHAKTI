@@ -1,6 +1,6 @@
 import React from 'react'
 import { useStore } from '../store'
-import { Page, Kpi, Meter, LineChart, fmtTime } from '../components'
+import { Page, Kpi, SemiCircleGauge, LineChart, fmtTime } from '../components'
 
 export const LivePage: React.FC = () => {
   const { station, events } = useStore()
@@ -11,22 +11,8 @@ export const LivePage: React.FC = () => {
   const supply = bal.solar_kw + bal.wind_kw + Math.max(0, -bal.battery_kw) + bal.diesel_kw
 
   return (
-    <Page title="Live Station Monitoring" meta={<span>{new Date().toLocaleTimeString()}</span>}>
-      {/* OPERATIONAL INTERPRETATION — not raw numbers */}
-      <div className="card" style={{ borderLeft: '4px solid var(--blue)', marginBottom: 14 }}>
-        <h3 style={{ margin: '0 0 6px', fontSize: 14, color: 'var(--blue)' }}>
-          WHAT IS HAPPENING PHYSICALLY RIGHT NOW?
-        </h3>
-        <p style={{ fontSize: 13, color: '#334155', margin: 0, lineHeight: 1.5 }}>
-          {(() => {
-            const renewPct = supply > 0 ? Math.round((bal.solar_kw + bal.wind_kw) / supply * 100) : 0
-            const battState = bal.battery_kw > 2 ? 'charging' : bal.battery_kw < -2 ? 'discharging to supplement supply' : 'idle'
-            const genState = station.generator_running ? `Generator is active at ${Math.round(station.generator_output_kw)} kW` : 'Generator is on standby'
-            return `Renewables currently supply ${renewPct}% of demand. Battery is ${battState}. ${genState}. Ambient temperature is ${w.temperature_c.toFixed(1)}°C with ${w.wind_speed_ms.toFixed(0)} m/s wind.`
-          })()}
-        </p>
-      </div>
-      <div className="grid g4">
+    <Page title="Live Physical State" meta={<span className="badge info">{new Date().toLocaleTimeString()}</span>}>
+      <div className="grid g4" style={{ marginBottom: 14 }}>
         <Kpi label="Power Demand" value={Math.round(station.loads.total_kw)} unit="kW" />
         <Kpi label="Temperature" value={w.temperature_c.toFixed(1)} unit="°C" sub={w.condition} />
         <Kpi label="Wind Speed" value={w.wind_speed_ms.toFixed(1)} unit="m/s" />
@@ -41,26 +27,50 @@ export const LivePage: React.FC = () => {
 
       <div className="section grid g2">
         <div className="card">
-          <h3>Energy Balance</h3>
+          <h3 style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.8, color: 'var(--text-dim)', marginBottom: 8 }}>
+            Energy Balance
+          </h3>
           <table>
             <tbody>
-              <tr><td className="plain">Supply (solar + wind + discharge + diesel)</td><td>{Math.round(supply)} kW</td></tr>
-              <tr><td className="plain">Load + losses</td><td>{Math.round(bal.load_kw * 1.02)} kW</td></tr>
-              <tr><td className="plain">Heating component</td><td>{Math.round(bal.heating_kw ?? 0)} kW</td></tr>
-              <tr><td className="plain">Battery</td><td>{bal.battery_kw >= 0 ? `charging +${Math.round(bal.battery_kw)}` : `discharging ${Math.round(bal.battery_kw)}`} kW</td></tr>
+              <tr><td className="plain">Total Supply (Solar + Wind + Battery + Diesel)</td><td>{Math.round(supply)} kW</td></tr>
+              <tr><td className="plain">Station Load (Critical + Flexible)</td><td>{Math.round(bal.load_kw)} kW</td></tr>
+              <tr><td className="plain">Thermal Heating Component</td><td>{Math.round(bal.heating_kw ?? 0)} kW</td></tr>
+              <tr><td className="plain">Battery Storage Flow</td><td>{bal.battery_kw >= 0 ? `charging +${Math.round(bal.battery_kw)}` : `discharging ${Math.round(bal.battery_kw)}`} kW</td></tr>
             </tbody>
           </table>
         </div>
+
         <div className="card">
-          <h3>Storage</h3>
-          <div className="row" style={{ justifyContent: 'space-between' }}>
-            <span>Battery SOC {Math.round(station.battery_soc)}%</span><span>SOH {station.battery_soh}%</span>
+          <h3 style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.8, color: 'var(--text-dim)', marginBottom: 8 }}>
+            Storage & Capacity Gauges
+          </h3>
+          <div style={{ display: 'flex', justifyContent: 'space-around', alignItems: 'center', padding: '10px 0' }}>
+            <SemiCircleGauge
+              value={station.battery_soc}
+              unit="%"
+              label="Battery SOC"
+              width={100}
+              height={58}
+              strokeWidth={8}
+            />
+            <SemiCircleGauge
+              value={station.battery_soh}
+              unit="%"
+              label="Battery SOH"
+              width={100}
+              height={58}
+              strokeWidth={8}
+              status="safe"
+            />
+            <SemiCircleGauge
+              value={station.fuel_pct}
+              unit="%"
+              label={`Fuel (${Math.round(station.fuel_l).toLocaleString()}L)`}
+              width={100}
+              height={58}
+              strokeWidth={8}
+            />
           </div>
-          <Meter pct={station.battery_soc} ok={40} warn={30} />
-          <div className="row" style={{ justifyContent: 'space-between', marginTop: 10 }}>
-            <span>Fuel {Math.round(station.fuel_l).toLocaleString()} L</span><span>{station.fuel_pct}%</span>
-          </div>
-          <Meter pct={station.fuel_pct} ok={40} warn={15} />
         </div>
       </div>
 

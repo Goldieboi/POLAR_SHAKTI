@@ -26,6 +26,9 @@ def _publish(topic: str, value, unit: str) -> None:
 
 def tick() -> None:
     global _tick
+    # Phase 2: respect simulation_paused — do not advance physics while judge experiments
+    if STATE.simulation_paused:
+        return
     _tick += 1
     try:
         balance = plant.sim_step(SIM_HOURS_PER_TICK)
@@ -70,6 +73,9 @@ def tick() -> None:
                       unit="kW", quality=1.0, source="simulated")
             db.insert("sensor_readings", ts=now, sensor="wind_kw", value=balance["wind_kw"],
                       unit="kW", quality=1.0, source="simulated")
+            db.insert("sensor_readings", ts=now, sensor="battery_soc",
+                      value=round(STATE.battery_soc, 1), unit="%",
+                      quality=1.0, source="simulated")
 
         # --- resupply clock ---
         STATE.resupply_date_days = max(0.0, STATE.resupply_date_days - SIM_HOURS_PER_TICK / 24)

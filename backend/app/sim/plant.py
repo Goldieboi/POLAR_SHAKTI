@@ -101,7 +101,7 @@ def sim_step(dt_h: float) -> dict:
             avail_kwh = BATTERY_CAPACITY_KWH * max(0.0, STATE.battery_soc - floor) / 100.0
             max_kw = avail_kwh / dt_h * eff
             battery_kw = max(battery_kw, -min(BATTERY_MAX_DISCHARGE_KW, max_kw))
-            STATE.battery_soc += (-battery_kw) / eff * dt_h / BATTERY_CAPACITY_KWH * 100
+            STATE.battery_soc -= (-battery_kw) / eff * dt_h / BATTERY_CAPACITY_KWH * 100
         battery_kw = round(battery_kw, 1)
         STATE.battery_power_kw = battery_kw
 

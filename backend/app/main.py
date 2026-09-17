@@ -26,6 +26,7 @@ from .api import (
     connectivity_router, data_router, actions_router, models_router,
 )
 from .api.scenario_v1 import router as scenario_v1_router
+from .api.sandbox import router as sandbox_router
 
 app = FastAPI(title="POLAR-EMS", version="1.0.0",
               description="Autonomy-Aware Polar Energy Management System — SIMULATION / DEMONSTRATION DATA")
@@ -47,6 +48,7 @@ def health_check() -> dict:
     }
 
 app.include_router(scenario_v1_router, prefix="/api")
+app.include_router(sandbox_router, prefix="/api")
 
 for r in (station_router, sensors_router, weather_router, forecast_router,
           autonomy_router, optimization_router, safety_router, resupply_router,

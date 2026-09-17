@@ -6,9 +6,14 @@ from __future__ import annotations
 
 import time
 
-from .. import db
-from ..config import SAFETY_RULES, EMERGENCY_FUEL_PCT, USABLE_FUEL_L
-from ..state.system_state import STATE
+try:
+    from .. import db
+    from ..config import SAFETY_RULES, EMERGENCY_FUEL_PCT, USABLE_FUEL_L
+    from ..state.system_state import STATE
+except (ImportError, ValueError):
+    from app import db
+    from app.config import SAFETY_RULES, EMERGENCY_FUEL_PCT, USABLE_FUEL_L
+    from app.state.system_state import STATE
 
 _active: dict[str, dict] = {}
 

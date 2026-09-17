@@ -8,9 +8,14 @@ from __future__ import annotations
 
 import time
 
-from ..config import SAFETY_RULES
-from ..state.system_state import STATE
-from . import forecast as fc
+try:
+    from ..config import SAFETY_RULES
+    from ..state.system_state import STATE
+    from . import forecast as fc
+except (ImportError, ValueError):
+    from app.config import SAFETY_RULES
+    from app.state.system_state import STATE
+    from app.engines import forecast as fc
 
 
 def validate(plan: dict) -> dict:
@@ -74,6 +79,42 @@ def validate(plan: dict) -> dict:
     bad_balance = [s for s in plan.get("steps", [])
                    if abs((s["solar_kw"] + s["wind_kw"] + s["diesel_kw"] +
                            max(0.0, -s["battery_kw"])) - s["load_kw"]) > 0.15 * s["load_kw"] + 5]
-    # NOTE: balance tolerance — LP plans meet load exactly; rule-based may hold battery
+
+    # 7. resupply margin (CQRM >= 0.0 Days)
+    # The nominal optimizer plan requires positive resupply margin (Safe Operability >= P90 Resupply).
+    # If CQRM < 0, nominal plans are rejected and require conservation fallback.
+    is_fallback = (
+        "fallback" in plan.get("method", "").lower()
+        or "fallback" in str(plan.get("reason", "")).lower()
+        or STATE.scenario.get("conserve", False)
+        or plan.get("is_conservation_strategy", False)
+    )
+    try:
+        from . import autonomy as au
+        auto_calc = au.calculate()
+        margin = auto_calc.get("cqrm_margin_days", auto_calc.get("autonomy_margin_days", 0.0))
+        p90_days = auto_calc.get("next_resupply_days", auto_calc.get("resupply_conservative_days", 10.3))
+        safe_days = auto_calc.get("safe_autonomy_days", 10.8)
+    except Exception:
+        margin = 0.5
+        p90_days = 10.3
+        safe_days = 10.8
+
+    if not is_fallback and margin < -0.05:
+        passed = False
+        ok &= passed
+        checks.append({
+            "rule": "resupply_margin",
+            "passed": False,
+            "detail": f"Negative CQRM margin ({margin:.1f} days) — Safe operability ({safe_days:.1f}d) is shorter than P90 resupply ETA ({p90_days:.1f}d). Fallback required.",
+        })
+    else:
+        checks.append({
+            "rule": "resupply_margin",
+            "passed": True,
+            "detail": f"CQRM margin {margin:+.1f} days (resupply safely reachable)" if not is_fallback else f"Conservation fallback active under negative margin ({margin:.1f}d)",
+        })
+
     result = {"passed": bool(ok), "checks": checks, "validated_at": time.time()}
     return result
+

@@ -4,7 +4,7 @@ import { Page } from '../components'
 
 export const DataPage: React.FC = () => {
   const [quality, setQuality] = useState<any>(null)
-  const [view, setView] = useState<'overview' | 'readings' | 'quality' | 'mqtt' | 'actions'>('overview')
+  const [view, setView] = useState<'overview' | 'readings' | 'quality' | 'telemetry' | 'actions'>('overview')
   const [sensors, setSensors] = useState<string[]>([])
   const [sensor, setSensor] = useState('')
   const [rows, setRows] = useState<any[]>([])
@@ -20,7 +20,7 @@ export const DataPage: React.FC = () => {
     if (view === 'readings') {
       get<{ readings: any[] }>(`/data/readings?limit=200${sensor ? `&sensor=${sensor}` : ''}`)
         .then(r => setRows(r.readings))
-    } else if (view === 'mqtt') {
+    } else if (view === 'telemetry') {
       get<any>('/sensors/mqtt').then(setMqtt)
     } else if (view === 'actions') {
       get<{ actions: any[] }>('/data/operator-actions?limit=100').then(r => setActions(r.actions))
@@ -30,9 +30,9 @@ export const DataPage: React.FC = () => {
   return (
     <Page title="Data & Diagnostics" meta={
       <div className="row">
-        {(['overview', 'readings', 'quality', 'mqtt', 'actions'] as const).map(v => (
+        {(['overview', 'readings', 'quality', 'telemetry', 'actions'] as const).map(v => (
           <button key={v} className={view === v ? 'primary' : ''} onClick={() => setView(v)}>
-            {v === 'overview' ? 'OVERVIEW' : v.toUpperCase()}
+            {v === 'overview' ? 'OVERVIEW' : v === 'telemetry' ? 'TELEMETRY HEALTH' : v.toUpperCase()}
           </button>
         ))}
       </div>
@@ -47,11 +47,11 @@ export const DataPage: React.FC = () => {
           {quality.issues.length > 0 ? (
             <p className="note">{quality.issues.join(' · ')}</p>
           ) : (
-            <p className="note">No issues detected in the recent window.</p>
+            <p className="note">No data-quality issues detected in the recent window.</p>
           )}
           <div className="note" style={{ marginTop: 8 }}>
             Bad data is flagged, never silently hidden. Out-of-range / anomalous readings carry reduced quality scores downstream.
-            Use the READINGS tab for raw sensor data, MQTT for ingestion bus diagnostics, and ACTIONS for the operator audit trail.
+            Use READINGS for raw sensor telemetry, TELEMETRY HEALTH for edge ingestion diagnostics, and ACTIONS for the operator audit trail.
           </div>
         </div>
       )}
@@ -105,9 +105,9 @@ export const DataPage: React.FC = () => {
         </div>
       )}
 
-      {view === 'mqtt' && mqtt && (
+      {view === 'telemetry' && mqtt && (
         <div className="card">
-          <h3>Simulated MQTT Ingestion Bus — {mqtt.mqtt_connected ? 'CONNECTED' : 'DISCONNECTED'} ({mqtt.total_messages} messages)</h3>
+          <h3>Edge Ingestion & Telemetry Bus — {mqtt.mqtt_connected ? 'CONNECTED' : 'DISCONNECTED'} ({mqtt.total_messages} readings ingested)</h3>
           <table>
             <thead><tr><th>Topic</th><th>Status</th><th>Messages</th><th>Last message</th></tr></thead>
             <tbody>

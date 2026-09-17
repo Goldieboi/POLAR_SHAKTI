@@ -129,6 +129,28 @@ export interface DemoState {
   paused: boolean
 }
 
+export interface ModelExecutionState {
+  id: string
+  name: string
+  category: 'predictive' | 'decision'
+  loaded: boolean
+  feature_validation: 'passed' | 'failed' | 'pending' | string
+  execution_status: 'ready' | 'running' | 'complete' | 'degraded' | string
+  last_run: string | null
+  scenario: string
+  feature_count?: number
+  model_family?: string
+  engine_type?: string
+  duration_ms?: number
+}
+
+export interface IntelligenceStatus {
+  predictive_models: ModelExecutionState[]
+  decision_engines: ModelExecutionState[]
+  last_pipeline_run: string
+  pipeline_status: string
+}
+
 export interface Station {
   station: { id: string; name: string; simulation: boolean }
   sim_time_h: number
@@ -164,6 +186,7 @@ export interface Station {
   what_changed?: WhatChanged[]
   before_after_replan?: BeforeAfterReplan
   demo_state?: DemoState
+  intelligence?: IntelligenceStatus
 }
 
 export interface Step {
@@ -268,3 +291,182 @@ export interface BaselineComparison {
   }
   summary: string
 }
+
+// ---------------------------------------------------------- Sandbox (Phase 2) --
+
+export interface SandboxExperimentRequest {
+  sandbox_session_id?: string
+  battery_soc?: number
+  battery_soh?: number
+  solar_kw?: number
+  wind_kw?: number
+  station_load_kw?: number
+  critical_load_kw?: number
+  flexible_load_kw?: number
+  fuel_l?: number
+  generator_available?: boolean
+  resupply_delay_days?: number
+  communication_loss?: boolean
+  temperature_c?: number
+}
+
+export interface InputProvenance {
+  value: number | boolean
+  source: 'manual_override' | 'model_prediction' | 'scenario_override' | 'simulation_state' | 'cached_value'
+  label: string
+}
+
+export interface ExecutionTraceStep {
+  step: string
+  status: 'complete' | 'running' | 'pending' | 'failed'
+  detail: string
+}
+
+export interface MLInputUsed {
+  name: string
+  type: string
+  active: boolean
+}
+
+export interface CandidatePlan {
+  id: string
+  name: string
+  short_name: string
+  strategy_type: string
+  simple_description: string
+  is_recommended: boolean
+  confidence: 'STRONGLY PREFERRED' | 'PREFERRED' | 'ALTERNATIVE' | 'NOT RECOMMENDED' | 'UNSAFE' | string
+  status_label: 'RECOMMENDED' | 'AVAILABLE' | 'SELECTED' | 'ACTIVE' | 'UNSAFE' | string
+  safety_passed: boolean
+  safety_checks: Array<{ rule: string; passed: boolean; detail: string }>
+  failed_reasons: string[]
+  safe_operability_days: number
+  cqrm_days: number
+  end_soc: number
+  reserve_soc_target: number
+  fuel_6h_l: number
+  fuel_daily_l: number
+  critical_coverage_pct: number
+  flex_load_pct: number
+  flex_reduction_pct: number
+  generator_avg_kw: number
+  generator_max_kw: number
+  battery_avg_kw: number
+  optimizer_method: string
+  why_recommended: string
+  why_not_recommended: string
+  ml_inputs_used: MLInputUsed[]
+  plan_details?: {
+    reserve_soc: number
+    flex_mult: number
+    steps_count: number
+    first_step_diesel_kw: number
+    first_step_battery_kw: number
+  }
+}
+
+export interface RecoveryOption {
+  id: string
+  label: string
+  name: string
+  available: boolean
+  description: string
+  plan: CandidatePlan
+  safety_passed: boolean
+  safety_checks: Array<{ rule: string; passed: boolean; detail: string }>
+  failed_reasons: string[]
+  primary_limitation?: string | null
+}
+
+export interface SandboxExperimentResponse {
+  sandbox_session_id: string
+  baseline: {
+    battery_soc: number
+    battery_soh: number
+    fuel_l: number
+    safe_operability_days: number
+    cqrm_days: number
+    risk_level: string
+    reserve_target: number
+    resupply_delay_days: number
+  }
+  experiment: {
+    battery_soc: number
+    battery_soh: number
+    fuel_l: number
+    safe_operability_days: number
+    cqrm_days: number
+    risk_level: string
+    reserve_target: number
+    resupply_delay_days: number
+  }
+  recommendation: string
+  reason: string
+  safety: SafetyResult
+  autonomy: Autonomy
+  candidate_plans?: CandidatePlan[]
+  recovery_options?: RecoveryOption[]
+  recommended_plan_id?: string | null
+  selected_plan_id?: string | null
+  feasible_count?: number
+  rejected_count?: number
+  plans_advisory?: string
+  plan_summary: {
+    method: string
+    expected_fuel_l: number
+    reserve_soc_target: number
+    flexible_load_pct: number
+  }
+  input_provenance: Record<string, InputProvenance>
+  execution_trace: ExecutionTraceStep[]
+  state_version: number
+  calculated_at: number
+}
+
+export interface SandboxApplyResponse {
+  applied: boolean
+  applied_plan?: {
+    id?: string | null
+    name: string
+    simple_description: string
+  }
+  state_version: number
+  scenario_id: string
+  calculated_at: number
+  pipeline_result: {
+    status: string
+    autonomy_status: string
+    cqrm_days: number
+    safety_passed: boolean
+  }
+}
+
+export interface SandboxResetResponse {
+  reset: boolean
+  state_version: number
+  scenario_id: string
+  calculated_at: number
+  baseline: Record<string, any>
+}
+
+export interface ClockToggleResponse {
+  simulation_paused: boolean
+  status: string
+  state_version: number
+}
+
+// Sandbox API functions
+export const runSandboxExperiment = (req: SandboxExperimentRequest) =>
+  post<SandboxExperimentResponse>('/sandbox/experiment', req)
+
+export const selectCandidatePlan = (sandbox_session_id: string, plan_id: string) =>
+  post<{ selected_plan_id: string }>('/sandbox/select-plan', { sandbox_session_id, plan_id })
+
+export const applySandboxExperiment = (sandbox_session_id: string, state_version: number, selected_plan_id?: string) =>
+  post<SandboxApplyResponse>('/sandbox/apply', { sandbox_session_id, state_version, selected_plan_id })
+
+export const resetSandboxToBaseline = (sandbox_session_id?: string) =>
+  post<SandboxResetResponse>('/sandbox/reset', { sandbox_session_id })
+
+export const toggleSimulationClock = () =>
+  post<ClockToggleResponse>('/sandbox/clock')

@@ -4,6 +4,7 @@ import time
 from fastapi import APIRouter
 
 from ..state.system_state import STATE
+from ..services.model_loader import get_model_loader
 
 router = APIRouter(prefix="/station", tags=["station"])
 
@@ -28,4 +29,8 @@ def station_overview() -> dict:
     snap["what_changed"] = STATE.what_changed
     snap["before_after_replan"] = STATE.before_after_replan
     snap["demo_state"] = getattr(STATE, "demo_state", {})
+    try:
+        snap["intelligence"] = get_model_loader().get_intelligence_status()
+    except Exception:
+        snap["intelligence"] = {}
     return snap

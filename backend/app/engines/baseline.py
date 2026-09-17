@@ -13,14 +13,24 @@ from __future__ import annotations
 
 import time
 
-from ..config import (
-    BATTERY_CAPACITY_KWH, BATTERY_MAX_CHARGE_KW, BATTERY_MAX_DISCHARGE_KW,
-    BATTERY_CHARGE_EFF, BATTERY_DISCHARGE_EFF, DIESEL_FUEL_L_PER_KWH,
-    DIESEL_MIN_KW, SAFETY_RULES, USABLE_FUEL_L,
-)
-from ..state.system_state import STATE
-from . import forecast as fc
-from . import autonomy as au
+try:
+    from ..config import (
+        BATTERY_CAPACITY_KWH, BATTERY_MAX_CHARGE_KW, BATTERY_MAX_DISCHARGE_KW,
+        BATTERY_CHARGE_EFF, BATTERY_DISCHARGE_EFF, DIESEL_FUEL_L_PER_KWH,
+        DIESEL_MIN_KW, SAFETY_RULES, USABLE_FUEL_L,
+    )
+    from ..state.system_state import STATE
+    from . import forecast as fc
+    from . import autonomy as au
+except (ImportError, ValueError):
+    from app.config import (
+        BATTERY_CAPACITY_KWH, BATTERY_MAX_CHARGE_KW, BATTERY_MAX_DISCHARGE_KW,
+        BATTERY_CHARGE_EFF, BATTERY_DISCHARGE_EFF, DIESEL_FUEL_L_PER_KWH,
+        DIESEL_MIN_KW, SAFETY_RULES, USABLE_FUEL_L,
+    )
+    from app.state.system_state import STATE
+    from app.engines import forecast as fc
+    from app.engines import autonomy as au
 
 
 HORIZON_H = 6

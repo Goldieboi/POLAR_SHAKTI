@@ -9,8 +9,12 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-from ..config import DIESEL_RATED_KW
-from ..state.system_state import STATE
+try:
+    from ..config import DIESEL_RATED_KW
+    from ..state.system_state import STATE
+except (ImportError, ValueError):
+    from app.config import DIESEL_RATED_KW
+    from app.state.system_state import STATE
 
 # plausible ranges per sensor
 RANGES = {

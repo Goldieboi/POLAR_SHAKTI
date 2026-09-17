@@ -16,9 +16,14 @@ from typing import Optional
 
 import numpy as np
 
-from ..config import FORECAST_HORIZONS_H, FORECAST_HISTORY_H, UNCERTAINTY_Z
-from .. import db
-from ..state.system_state import STATE
+try:
+    from ..config import FORECAST_HORIZONS_H, FORECAST_HISTORY_H, UNCERTAINTY_Z
+    from .. import db
+    from ..state.system_state import STATE
+except (ImportError, ValueError):
+    from app.config import FORECAST_HORIZONS_H, FORECAST_HISTORY_H, UNCERTAINTY_Z
+    from app import db
+    from app.state.system_state import STATE
 
 MODEL_VERSION = "ridge-1.2.0"
 MODEL_TRAINED_AT: Optional[float] = None

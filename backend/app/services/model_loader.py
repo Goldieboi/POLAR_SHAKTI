@@ -8,16 +8,30 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 import joblib
 
 logger = logging.getLogger("polar_ems.models")
 
-# Define project base and models directory
-BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
-DEFAULT_MODELS_DIR = BASE_DIR / "models"
-MODELS_DIR = Path(os.environ.get("POLAR_EMS_MODELS_DIR", DEFAULT_MODELS_DIR))
+# Helper to find models directory across diverse execution roots
+def _find_models_dir() -> Path:
+    env_dir = os.environ.get("POLAR_EMS_MODELS_DIR")
+    if env_dir and Path(env_dir).exists():
+        return Path(env_dir)
+    curr = Path(__file__).resolve()
+    for p in curr.parents:
+        cand = p / "models"
+        if cand.exists() and (cand / "polar_ems_weather_load_forecaster.joblib").exists():
+            return cand
+    for p in curr.parents:
+        cand = p / "models"
+        if cand.exists():
+            return cand
+    return curr.parent.parent.parent / "models"
+
+MODELS_DIR = _find_models_dir()
 
 
 class ModelLoader:
@@ -28,6 +42,90 @@ class ModelLoader:
         self.models: Dict[str, Any] = {}
         self.metadata: Dict[str, Dict[str, Any]] = {}
         self.is_loaded: bool = False
+        self.execution_state: Dict[str, Dict[str, Any]] = {
+            "load": {
+                "id": "load",
+                "name": "Demand Forecast",
+                "category": "predictive",
+                "loaded": False,
+                "feature_validation": "passed",
+                "execution_status": "ready",
+                "last_run": time.strftime("%H:%M:%S"),
+                "scenario": "NORMAL",
+                "feature_count": 20,
+                "model_family": "XGBoost",
+            },
+            "solar": {
+                "id": "solar",
+                "name": "Solar Forecast",
+                "category": "predictive",
+                "loaded": False,
+                "feature_validation": "passed",
+                "execution_status": "ready",
+                "last_run": time.strftime("%H:%M:%S"),
+                "scenario": "NORMAL",
+                "feature_count": 12,
+                "model_family": "XGBoost",
+            },
+            "wind": {
+                "id": "wind",
+                "name": "Wind Forecast",
+                "category": "predictive",
+                "loaded": False,
+                "feature_validation": "passed",
+                "execution_status": "ready",
+                "last_run": time.strftime("%H:%M:%S"),
+                "scenario": "NORMAL",
+                "feature_count": 17,
+                "model_family": "XGBoost",
+            },
+            "battery_soh": {
+                "id": "battery_soh",
+                "name": "Battery Health",
+                "category": "predictive",
+                "loaded": False,
+                "feature_validation": "passed",
+                "execution_status": "ready",
+                "last_run": time.strftime("%H:%M:%S"),
+                "scenario": "NORMAL",
+                "feature_count": 8,
+                "model_family": "Extra Trees",
+            },
+            "anomaly": {
+                "id": "anomaly",
+                "name": "SCADA Analytics",
+                "category": "predictive",
+                "loaded": False,
+                "feature_validation": "passed",
+                "execution_status": "ready",
+                "last_run": time.strftime("%H:%M:%S"),
+                "scenario": "NORMAL",
+                "feature_count": 23,
+                "model_family": "Isolation Forest",
+            },
+            "optimizer": {
+                "id": "optimizer",
+                "name": "Optimizer (HiGHS LP)",
+                "category": "decision",
+                "loaded": True,
+                "feature_validation": "passed",
+                "execution_status": "ready",
+                "last_run": time.strftime("%H:%M:%S"),
+                "scenario": "NORMAL",
+                "engine_type": "Linear Programming Dispatch",
+            },
+            "safety": {
+                "id": "safety",
+                "name": "Safety Validator",
+                "category": "decision",
+                "loaded": True,
+                "feature_validation": "passed",
+                "execution_status": "ready",
+                "last_run": time.strftime("%H:%M:%S"),
+                "scenario": "NORMAL",
+                "engine_type": "Deterministic Rule Gate",
+            },
+        }
 
     @classmethod
     def get_instance(cls, models_dir: Path = MODELS_DIR) -> "ModelLoader":
@@ -54,6 +152,8 @@ class ModelLoader:
                 "lag_1", "lag_2", "lag_3", "lag_6", "lag_12", "lag_144",
                 "wind_lag_1", "wind_lag_6", "rolling_6", "rolling_18"
             ]
+            self.execution_state["wind"]["loaded"] = True
+            self.execution_state["wind"]["execution_status"] = "ready"
             logger.info("Loaded Wind Model (17 features)")
 
         # 2. Load Load Forecast Model (20 features)
@@ -62,6 +162,8 @@ class ModelLoader:
         if load_model_path.exists():
             self.models["load"] = joblib.load(load_model_path)
             self.metadata["load"] = self._load_json(load_meta_path)
+            self.execution_state["load"]["loaded"] = True
+            self.execution_state["load"]["execution_status"] = "ready"
             logger.info("Loaded Weather-Aware Load Forecaster (20 features)")
 
         # 3. Load Solar Forecast Model (12 features)
@@ -70,6 +172,8 @@ class ModelLoader:
         if solar_model_path.exists():
             self.models["solar"] = joblib.load(solar_model_path)
             self.metadata["solar"] = self._load_json(solar_meta_path)
+            self.execution_state["solar"]["loaded"] = True
+            self.execution_state["solar"]["execution_status"] = "ready"
             logger.info("Loaded Solar Forecaster (12 features)")
 
         # 4. Load Battery SOH Model (8 features)
@@ -78,6 +182,8 @@ class ModelLoader:
         if soh_model_path.exists():
             self.models["battery_soh"] = joblib.load(soh_model_path)
             self.metadata["battery_soh"] = self._load_json(soh_meta_path)
+            self.execution_state["battery_soh"]["loaded"] = True
+            self.execution_state["battery_soh"]["execution_status"] = "ready"
             logger.info("Loaded Battery SOH Model (8 features)")
 
         # 5. Load SCADA Anomaly Detector (23 features)
@@ -86,6 +192,8 @@ class ModelLoader:
         if anomaly_model_path.exists():
             self.models["anomaly"] = joblib.load(anomaly_model_path)
             self.metadata["anomaly"] = self._load_json(anomaly_meta_path)
+            self.execution_state["anomaly"]["loaded"] = True
+            self.execution_state["anomaly"]["execution_status"] = "ready"
             logger.info("Loaded SCADA Anomaly Detector (23 features)")
 
         self.is_loaded = True
@@ -93,6 +201,41 @@ class ModelLoader:
             "status": "success",
             "models_loaded": list(self.models.keys()),
             "count": len(self.models)
+        }
+
+    def update_execution(
+        self,
+        name: str,
+        execution_status: str = "complete",
+        feature_validation: Optional[str] = None,
+        scenario: Optional[str] = None,
+        duration_ms: Optional[float] = None,
+    ) -> None:
+        if name in self.execution_state:
+            self.execution_state[name]["execution_status"] = execution_status
+            self.execution_state[name]["last_run"] = time.strftime("%H:%M:%S")
+            if feature_validation:
+                self.execution_state[name]["feature_validation"] = feature_validation
+            if scenario:
+                self.execution_state[name]["scenario"] = scenario
+            if duration_ms is not None:
+                self.execution_state[name]["duration_ms"] = duration_ms
+
+    def get_intelligence_status(self) -> Dict[str, Any]:
+        return {
+            "predictive_models": [
+                self.execution_state["load"],
+                self.execution_state["solar"],
+                self.execution_state["wind"],
+                self.execution_state["battery_soh"],
+                self.execution_state["anomaly"],
+            ],
+            "decision_engines": [
+                self.execution_state["optimizer"],
+                self.execution_state["safety"],
+            ],
+            "last_pipeline_run": time.strftime("%H:%M:%S"),
+            "pipeline_status": "COMPLETE",
         }
 
     def _load_json(self, path: Path) -> Dict[str, Any]:

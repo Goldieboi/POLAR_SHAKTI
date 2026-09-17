@@ -9,13 +9,22 @@ import threading
 import time
 from typing import Any
 
-from ..state.system_state import STATE
-from . import forecast as fc
-from . import autonomy as au
-from . import optimizer as op
-from . import safety as sf
-from . import alerts as al
-from .. import db
+try:
+    from ..state.system_state import STATE
+    from . import forecast as fc
+    from . import autonomy as au
+    from . import optimizer as op
+    from . import safety as sf
+    from . import alerts as al
+    from .. import db
+except (ImportError, ValueError):
+    from app.state.system_state import STATE
+    from app.engines import forecast as fc
+    from app.engines import autonomy as au
+    from app.engines import optimizer as op
+    from app.engines import safety as sf
+    from app.engines import alerts as al
+    from app import db
 
 # SCENARIO DEFINITIONS: Partitioned into Primary and Secondary
 PRIMARY_SCENARIOS = {

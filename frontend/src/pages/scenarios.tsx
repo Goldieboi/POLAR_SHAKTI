@@ -1,8 +1,12 @@
 import React, { useState, useEffect } from 'react'
-import { runScenarioV1, ScenarioV1Response } from '../api'
-import { Page, statusBadge } from '../components'
+import { runScenarioV1, ScenarioV1Response, post } from '../api'
+import { Page, statusBadge, BeforeAfterReplanCard } from '../components'
 import { useStore } from '../store'
 
+/**
+ * Scenarios & Stress Testing — Demonstration & Proof Screen.
+ * Answers: "WHAT IF CONDITIONS CHANGE? (DEMONSTRATION & PROOF)"
+ */
 export const ScenariosPage: React.FC = () => {
   const { station, refresh } = useStore()
   const [selectedScenario, setSelectedScenario] = useState<string>('NORMAL')
@@ -16,49 +20,42 @@ export const ScenariosPage: React.FC = () => {
       label: '1. NORMAL OPERATIONS',
       badge: 'NOMINAL',
       badgeClass: 'safe',
-      desc: 'Nominal load, typical polar renewables, standard resupply envelope (+0.49 d CQRM). Plan is ACCEPTED.'
-    },
-    {
-      id: 'RESUPPLY_DELAY_4D',
-      label: '2. RESUPPLY DELAY (+4 DAYS)',
-      badge: 'LOGISTICS STRESS',
-      badgeClass: 'danger',
-      desc: 'Convoy delayed 4 days. CQRM drops to -3.51 d (CRITICAL). Reserve requirement rises to 76.8% SOC. Safety Validator REJECTS plan.'
+      desc: 'Typical polar renewables, standard resupply envelope (+0.49 d CQRM). Plan is ACCEPTED.'
     },
     {
       id: 'STORM',
-      label: '3. ANTARCTIC STORM',
+      label: '2. ANTARCTIC STORM',
       badge: 'WEATHER SEVERE',
       badgeClass: 'danger',
-      desc: 'Severe gale drops wind to 45% & solar to 65%. Safe operability shrinks to 5.58 d. Optimizer becomes INFEASIBLE. Plan REJECTED.'
+      desc: 'Severe gale drops wind to 45% & solar to 65%. Heating surges. Safe operability falls to 5.58 d. Plan REJECTED.'
     },
     {
       id: 'LOW_RENEWABLE',
-      label: '4. LOW RENEWABLE PERIOD',
+      label: '3. LOW RENEWABLE PERIOD',
       badge: 'EXTENDED CALM',
       badgeClass: 'caution',
-      desc: 'Prolonged overcast and calm (60% wind, 50% solar). Operability 6.12 d. CQRM -4.18 d. Plan REJECTED.'
+      desc: 'Prolonged calm and overcast. Operability drops to 6.12 d. CQRM turns to -4.18 d. Plan REJECTED.'
+    },
+    {
+      id: 'RESUPPLY_DELAY_4D',
+      label: '4. RESUPPLY DELAY (+4 DAYS)',
+      badge: 'LOGISTICS STRESS',
+      badgeClass: 'danger',
+      desc: 'Convoy delayed 4 days. CQRM drops to -3.51 d (CRITICAL). Reserve requirement rises to 76.8% SOC.'
     },
     {
       id: 'BATTERY_DEGRADATION',
       label: '5. BATTERY DEGRADATION (75% SOH)',
       badge: 'HARDWARE WEAR',
       badgeClass: 'caution',
-      desc: 'SOH falls to 75% (~863 kWh usable capacity). Optimizer compensates with more generator energy. Safety validates SAFE.'
-    },
-    {
-      id: 'SCADA_ANOMALY',
-      label: '6. SCADA ANOMALY DETECTED',
-      badge: 'EARLY WARNING',
-      badgeClass: 'caution',
-      desc: 'Isolation Forest flags abnormal turbine vibration/voltage behavior. Generator capacity derated 25% for stress assessment.'
+      desc: 'Usable capacity degraded to ~863 kWh. Optimizer compensates with scheduled generation.'
     },
     {
       id: 'COMMUNICATION_LOSS',
-      label: '7. COMMUNICATION LOSS',
+      label: '6. COMMUNICATION LOSS',
       badge: 'OFFLINE AUTONOMY',
       badgeClass: 'info',
-      desc: 'External satellite link disconnected. Core dispatch, forecasting, LP optimization, and safety engine continue in LOCAL mode.'
+      desc: 'Satellite link disconnected. All forecasting, optimization, and safety run locally.'
     }
   ]
 
@@ -67,6 +64,11 @@ export const ScenariosPage: React.FC = () => {
     setError(null)
     setSelectedScenario(id)
     try {
+      if (id === 'COMMUNICATION_LOSS') {
+        await post('/connectivity/simulate-loss', {}).catch(() => {})
+      } else if (id === 'NORMAL') {
+        await post('/connectivity/restore', {}).catch(() => {})
+      }
       const delay = id === 'RESUPPLY_DELAY_4D' ? 4.0 : 0.0
       const res = await runScenarioV1(id, delay)
       setScenarioResult(res)
@@ -85,261 +87,127 @@ export const ScenariosPage: React.FC = () => {
     executeScenario(saved)
   }, [])
 
+  const beforeAfter = station?.before_after_replan
+
   return (
     <Page
-      title="Scenario Simulator & Resupply-Aware Stress Testing"
-      technicalDisclosure={true}
+      title="Scenario Stress Testing & Proof"
       meta={scenarioResult && (
         <span className={`badge ${scenarioResult.final_decision === 'ACCEPT_PLAN' ? 'safe' : 'danger'}`}>
-          {scenarioResult.final_decision} · {scenarioResult.operating_mode}
+          {scenarioResult.final_decision} &bull; {scenarioResult.operating_mode}
         </span>
       )}
     >
-      {/* 1. SCENARIO SELECTOR CARDS */}
-      <div className="section">
-        <h3 style={{ fontSize: 13, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12, fontWeight: 700, color: 'var(--text)' }}>
-          SELECT AN OPERATIONAL STRESS SCENARIO
-        </h3>
-        <div className="grid g3" style={{ marginBottom: 16 }}>
-          {scenariosList.slice(0, 3).map((sc) => (
-            <div
-              key={sc.id}
-              className="card"
-              style={{
-                borderTop: selectedScenario === sc.id ? '4px solid var(--blue)' : '4px solid var(--border)',
-                background: selectedScenario === sc.id ? 'rgba(56, 189, 248, 0.05)' : undefined,
-                cursor: 'pointer'
-              }}
-              onClick={() => executeScenario(sc.id)}
-            >
-              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
-                <h4 style={{ margin: 0, fontSize: 13, fontWeight: 700 }}>{sc.label}</h4>
-                <span className={`badge ${sc.badgeClass}`}>{sc.badge}</span>
-              </div>
-              <p style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 12, minHeight: 48 }}>
-                {sc.desc}
-              </p>
-              <button
-                type="button"
-                className={selectedScenario === sc.id ? 'primary' : ''}
-                disabled={loading}
-                style={{ width: '100%', fontWeight: 600 }}
-              >
-                {selectedScenario === sc.id && loading ? 'Simulating…' : selectedScenario === sc.id ? '✓ Active Scenario' : 'Run Scenario'}
-              </button>
-            </div>
-          ))}
+      {/* 1. QUESTION HEADER */}
+      <div className="card" style={{ borderLeft: '4px solid var(--blue)', marginBottom: 14 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--blue)', marginBottom: 4 }}>
+          WHAT IF CONDITIONS CHANGE? (DEMONSTRATION & PROOF)
         </div>
+        <p style={{ fontSize: 13, color: '#334155', margin: 0, lineHeight: 1.5 }}>
+          Select an operational stress condition below to observe how the POLAR-EMS decision chain responds in real-time across forecast intervals, safe operability horizons, CQRM margins, and deterministic safety validation.
+        </p>
+      </div>
 
-        <div className="grid g4">
-          {scenariosList.slice(3).map((sc) => (
-            <div
-              key={sc.id}
-              className="card"
-              style={{
-                borderTop: selectedScenario === sc.id ? '4px solid var(--blue)' : '4px solid var(--border)',
-                background: selectedScenario === sc.id ? 'rgba(56, 189, 248, 0.05)' : undefined,
-                cursor: 'pointer'
-              }}
-              onClick={() => executeScenario(sc.id)}
-            >
+      {/* 2. SCENARIO SELECTOR */}
+      <div className="grid g3" style={{ marginBottom: 14 }}>
+        {scenariosList.map((sc) => (
+          <div
+            key={sc.id}
+            className="card"
+            style={{
+              borderTop: selectedScenario === sc.id ? '4px solid var(--blue)' : '4px solid var(--border)',
+              background: selectedScenario === sc.id ? 'rgba(56, 189, 248, 0.05)' : undefined,
+              cursor: 'pointer',
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'space-between',
+            }}
+            onClick={() => executeScenario(sc.id)}
+          >
+            <div>
               <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
                 <h4 style={{ margin: 0, fontSize: 12, fontWeight: 700 }}>{sc.label}</h4>
                 <span className={`badge ${sc.badgeClass}`} style={{ fontSize: 10 }}>{sc.badge}</span>
               </div>
-              <p style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8, minHeight: 40 }}>
+              <p style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 10 }}>
                 {sc.desc}
               </p>
-              <button
-                type="button"
-                className={selectedScenario === sc.id ? 'primary' : ''}
-                disabled={loading}
-                style={{ width: '100%', fontSize: 11, padding: '4px 8px' }}
-              >
-                {selectedScenario === sc.id ? '✓ Selected' : 'Select'}
-              </button>
             </div>
-          ))}
-        </div>
+            <button
+              type="button"
+              className={selectedScenario === sc.id ? 'primary' : ''}
+              disabled={loading}
+              style={{ width: '100%', fontSize: 11, padding: '4px 8px', fontWeight: 600 }}
+            >
+              {selectedScenario === sc.id && loading ? 'Executing…' : selectedScenario === sc.id ? '✓ Active Scenario' : 'Run Scenario'}
+            </button>
+          </div>
+        ))}
       </div>
 
       {error && (
-        <div className="card" style={{ borderLeft: '4px solid var(--danger)', marginTop: 16 }}>
-          <b style={{ color: 'var(--danger)' }}>Scenario Error:</b> {error}
+        <div className="card" style={{ borderLeft: '4px solid var(--danger)', marginBottom: 14 }}>
+          <b style={{ color: 'var(--danger)' }}>Scenario Notice:</b> {error}
         </div>
       )}
 
-      {/* 2. REAL-TIME VALIDATED DECISION OUTPUT */}
+      {/* 3. BEFORE / AFTER REPLAN COMPARISON PROOF */}
+      {beforeAfter && (
+        <div className="section" style={{ marginBottom: 14 }}>
+          <BeforeAfterReplanCard data={beforeAfter} />
+        </div>
+      )}
+
+      {/* 4. SCENARIO OUTCOME KPIS */}
       {scenarioResult && (
-        <div className="section" style={{ marginTop: 20 }}>
-          <h3 style={{ fontSize: 13, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12, fontWeight: 700, color: 'var(--text)' }}>
-            VALIDATED SCENARIO OUTCOME: {scenarioResult.scenario}
-          </h3>
+        <div className="section card" style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 12 }}>
+            DECISION ENGINE OUTCOME: {scenarioResult.scenario}
+          </div>
 
-          {/* KPI GRID */}
-          <div className="grid g4" style={{ marginBottom: 16 }}>
-            {/* Safe Operability */}
-            <div className="card">
-              <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase' }}>SAFE OPERABILITY</div>
-              <div style={{ fontSize: 28, fontWeight: 800, color: scenarioResult.safe_operability_days < 7 ? 'var(--danger)' : 'var(--blue)', marginTop: 4 }}>
-                {scenarioResult.safe_operability_days.toFixed(2)} <span style={{ fontSize: 14, fontWeight: 500 }}>days</span>
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
-                Forward 30d physical simulation
+          <div className="grid g4" style={{ marginBottom: 14 }}>
+            <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: 6, border: '1px solid #e2e8f0' }}>
+              <div style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 600 }}>SAFE OPERABILITY</div>
+              <div style={{ fontSize: 24, fontWeight: 800, color: scenarioResult.safe_operability_days < 7 ? 'var(--danger)' : 'var(--blue)', marginTop: 2 }}>
+                {scenarioResult.safe_operability_days.toFixed(2)} <span style={{ fontSize: 12 }}>days</span>
               </div>
             </div>
 
-            {/* CQRM Margin */}
-            <div className="card">
-              <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase' }}>CQRM (RESUPPLY MARGIN)</div>
+            <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: 6, border: '1px solid #e2e8f0' }}>
+              <div style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 600 }}>CQRM RESUPPLY MARGIN</div>
               <div style={{
-                fontSize: 28,
+                fontSize: 24,
                 fontWeight: 800,
-                color: scenarioResult.cqrm_days < 0 ? 'var(--danger)' : scenarioResult.cqrm_days < 2 ? 'var(--amber)' : 'var(--green)',
-                marginTop: 4
+                color: scenarioResult.cqrm_days < 0 ? 'var(--danger)' : 'var(--green)',
+                marginTop: 2
               }}>
-                {scenarioResult.cqrm_days > 0 ? `+${scenarioResult.cqrm_days.toFixed(2)}` : scenarioResult.cqrm_days.toFixed(2)} <span style={{ fontSize: 14, fontWeight: 500 }}>days</span>
-              </div>
-              <div style={{ fontSize: 11, marginTop: 4 }}>
-                <span className={`badge ${
-                  scenarioResult.risk_level === 'SAFE' ? 'safe' :
-                  scenarioResult.risk_level === 'CAUTION' ? 'caution' :
-                  scenarioResult.risk_level === 'CONSERVE' ? 'conserve' : 'danger'
-                }`}>
-                  {scenarioResult.risk_level} RISK
-                </span>
-                <span style={{ color: 'var(--text-dim)', marginLeft: 6 }}>vs P90 ({scenarioResult.resupply_p90_days.toFixed(1)}d)</span>
+                {scenarioResult.cqrm_days > 0 ? `+${scenarioResult.cqrm_days.toFixed(2)}` : scenarioResult.cqrm_days.toFixed(2)} <span style={{ fontSize: 12 }}>days</span>
               </div>
             </div>
 
-            {/* Reserve Policy */}
-            <div className="card">
-              <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase' }}>DYNAMIC RESERVE SOC</div>
-              <div style={{ fontSize: 28, fontWeight: 800, color: 'var(--purple)', marginTop: 4 }}>
+            <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: 6, border: '1px solid #e2e8f0' }}>
+              <div style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 600 }}>DYNAMIC RESERVE TARGET</div>
+              <div style={{ fontSize: 24, fontWeight: 800, color: 'var(--purple)', marginTop: 2 }}>
                 {scenarioResult.required_reserve_soc_pct.toFixed(1)}%
               </div>
-              <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
-                Optimizer status: <b style={{ color: scenarioResult.optimizer_status === 'OPTIMAL' ? 'var(--green)' : 'var(--danger)' }}>{scenarioResult.optimizer_status}</b>
-              </div>
             </div>
 
-            {/* Authoritative Decision */}
-            <div className="card" style={{ borderLeft: scenarioResult.final_decision === 'ACCEPT_PLAN' ? '4px solid var(--green)' : '4px solid var(--danger)' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase' }}>FINAL OPERATIONAL DECISION</div>
-              <div style={{ fontSize: 20, fontWeight: 800, color: scenarioResult.final_decision === 'ACCEPT_PLAN' ? 'var(--green)' : 'var(--danger)', marginTop: 4 }}>
+            <div style={{ background: scenarioResult.final_decision === 'ACCEPT_PLAN' ? '#f0fdf4' : '#fef2f2', padding: '10px 14px', borderRadius: 6, border: scenarioResult.final_decision === 'ACCEPT_PLAN' ? '1px solid #bbf7d0' : '1px solid #fecaca' }}>
+              <div style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 600 }}>AUTHORITATIVE DECISION</div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: scenarioResult.final_decision === 'ACCEPT_PLAN' ? 'var(--green)' : 'var(--danger)', marginTop: 2 }}>
                 {scenarioResult.final_decision}
               </div>
-              <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
-                Safety: <b style={{ color: scenarioResult.safety_status === 'SAFE' ? 'var(--green)' : 'var(--danger)' }}>{scenarioResult.safety_status}</b> · {scenarioResult.operating_mode}
-              </div>
             </div>
           </div>
 
-          {/* DETAILED ACTION & SAFETY AUDIT */}
-          <div className="grid g2">
-            {/* Recommended Action & Reason */}
-            <div className="card">
-              <h4 style={{ margin: '0 0 8px', fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>
-                RECOMMENDED OPERATIONAL ACTION
-              </h4>
-              <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', marginBottom: 8 }}>
-                {scenarioResult.recommended_action}
-              </p>
-              <div style={{ fontSize: 12, color: 'var(--text-dim)', background: 'rgba(255,255,255,0.03)', padding: 10, borderRadius: 6 }}>
-                <b>Rationale:</b> {scenarioResult.reason}
-              </div>
-              <div style={{ marginTop: 10, fontSize: 12 }}>
-                <b>Operator Intervention:</b>{' '}
-                <span className={`badge ${scenarioResult.operator_intervention_required ? 'danger' : 'safe'}`}>
-                  {scenarioResult.operator_intervention_required ? 'REQUIRED (APPROVAL MANDATORY)' : 'NOT REQUIRED (WITHIN CONSTRAINTS)'}
-                </span>
-              </div>
+          <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: 6, border: '1px solid #e2e8f0' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a' }}>
+              Recommended Action: {scenarioResult.recommended_action}
             </div>
-
-            {/* Deterministic Safety Validator Audit */}
-            <div className="card">
-              <h4 style={{ margin: '0 0 8px', fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>
-                DETERMINISTIC SAFETY VALIDATOR AUDIT
-              </h4>
-              {scenarioResult.violations && scenarioResult.violations.length > 0 ? (
-                <div>
-                  <p style={{ fontSize: 12, color: 'var(--danger)', margin: '0 0 8px' }}>
-                    ⚠️ {scenarioResult.violations.length} Deterministic Safety Violation(s) Detected:
-                  </p>
-                  <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
-                    {scenarioResult.violations.map((v, i) => (
-                      <li key={i} style={{ color: 'var(--danger)', marginBottom: 4 }}>
-                        <code>{typeof v === 'string' ? v : v.code || JSON.stringify(v)}</code>
-                      </li>
-                    ))}
-                  </ul>
-                  <p style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8 }}>
-                    Rule: Deterministic Safety Validator has final authority. Safety violations cannot be overridden by ML risk estimates.
-                  </p>
-                </div>
-              ) : (
-                <div>
-                  <p style={{ fontSize: 12, color: 'var(--green)', margin: '0 0 8px' }}>
-                    ✓ All Model-7 deterministic safety constraints verified and satisfied:
-                  </p>
-                  <div style={{ fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.6 }}>
-                    • Min Battery SOC: &ge; 20.0% (Simulated: {scenarioResult.final_battery_soc_pct ?? scenarioResult.initial_battery_soc_pct}%)<br />
-                    • Fuel Reserve: &ge; 800 L (Final remaining: {scenarioResult.final_fuel_l ?? scenarioResult.initial_fuel_l} L)<br />
-                    • Critical Load Coverage: 100%<br />
-                    • Power Balance Error: &le; 5 kW tolerance<br />
-                    • Resupply Margin: &ge; 0.0 days (CQRM: +{scenarioResult.cqrm_days.toFixed(2)} d)
-                  </div>
-                </div>
-              )}
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
+              <b>Rationale:</b> {scenarioResult.reason}
             </div>
           </div>
-
-          {/* DISPATCH SUMMARY STRIP */}
-          {scenarioResult.optimizer_status === 'OPTIMAL' && (
-            <div className="card" style={{ marginTop: 16 }}>
-              <h4 style={{ margin: '0 0 10px', fontSize: 13, fontWeight: 700 }}>
-                OPTIMIZED 7-DAY DISPATCH SUMMARY
-              </h4>
-              <div className="grid g6" style={{ textAlign: 'center', fontSize: 12 }}>
-                <div>
-                  <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>GENERATOR ENERGY</span>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--amber)', marginTop: 2 }}>
-                    {scenarioResult.generator_energy_kwh?.toFixed(1)} kWh
-                  </div>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>DIESEL FUEL USED</span>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--amber)', marginTop: 2 }}>
-                    {scenarioResult.fuel_used_l?.toFixed(1)} L
-                  </div>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>RENEWABLES USED</span>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--green)', marginTop: 2 }}>
-                    {scenarioResult.renewable_used_kwh?.toFixed(1)} kWh
-                  </div>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>CURTAILMENT</span>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-dim)', marginTop: 2 }}>
-                    {scenarioResult.renewable_curtailed_kwh?.toFixed(1)} kWh
-                  </div>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>BATTERY DISCHARGE</span>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--blue)', marginTop: 2 }}>
-                    {scenarioResult.battery_discharge_kwh?.toFixed(1)} kWh
-                  </div>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>FINAL BATTERY SOC</span>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--purple)', marginTop: 2 }}>
-                    {scenarioResult.final_battery_soc_pct?.toFixed(1)}%
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       )}
     </Page>
